@@ -15,15 +15,13 @@ Kodyl is a decentralized event management protocol where attendees stake a small
 
 ## Inspiration
 
-This project is heavily inspired by [Kickback](https://kickback.events/), which pioneered the concept of stake-based event attendance. Kickback was (and is) a brilliant idea that solved real problems around event no-shows using blockchain incentives.
+This project is heavily inspired by [Kickback](https://kickback.events/), which pioneered the concept of stake-based event attendance. Kickback was a brilliant idea that solved real problems around event no-shows using blockchain incentives.
 
 Kodyl is a learning experiment and tribute to Kickback - reimagining the concept with:
 - Educational focus on Solidity best practices
 - Open-source public good approach
 - Simplified architecture for clarity and security
 - Potential to build something useful while honoring the original vision
-
-If you're organizing events, consider checking out [Kickback](https://kickback.events/) - they pioneered this space and have a proven solution.
 
 ## Documentation
 
