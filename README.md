@@ -1,66 +1,60 @@
-## Foundry
+# Kodyl
 
-**Foundry is a blazing fast, portable and modular toolkit for Ethereum application development written in Rust.**
+> Decentralized event management with skin-in-the-game incentives
 
-Foundry consists of:
+## Overview
 
-- **Forge**: Ethereum testing framework (like Truffle, Hardhat and DappTools).
-- **Cast**: Swiss army knife for interacting with EVM smart contracts, sending transactions and getting chain data.
-- **Anvil**: Local Ethereum node, akin to Ganache, Hardhat Network.
-- **Chisel**: Fast, utilitarian, and verbose solidity REPL.
+Kodyl is a decentralized event management protocol where attendees stake a small deposit when registering for an event. Show up and get your deposit back (plus a share of no-show deposits). Don't show up? You lose your stake.
+
+**Key Features:**
+- Deposit-based registration with automatic refund for attendees
+- Pro-rata distribution of no-show deposits to attendees
+- Dispute period for late check-in approvals
+- Configurable cancellation deadlines
+- Factory pattern (one contract per event) for isolation and security
+
+## Inspiration
+
+This project is heavily inspired by [Kickback](https://kickback.events/), which pioneered the concept of stake-based event attendance. Kickback was a brilliant idea that solved real problems around event no-shows using blockchain incentives.
+
+Kodyl is a learning experiment and tribute to Kickback - reimagining the concept with:
+- Educational focus on Solidity best practices
+- Open-source public good approach
+- Simplified architecture for clarity and security
+- Potential to build something useful while honoring the original vision
 
 ## Documentation
 
-https://book.getfoundry.sh/
+For detailed technical specification, architecture decisions, data models, and security considerations, see [spec.md](./spec.md).
 
-## Usage
+## Development
+
+This project uses [Foundry](https://book.getfoundry.sh/) for Ethereum smart contract development.
 
 ### Build
 
 ```shell
-$ forge build
+forge build
 ```
 
 ### Test
 
 ```shell
-$ forge test
+forge test
 ```
 
 ### Format
 
 ```shell
-$ forge fmt
+forge fmt
 ```
 
 ### Gas Snapshots
 
 ```shell
-$ forge snapshot
+forge snapshot
 ```
 
-### Anvil
+## License
 
-```shell
-$ anvil
-```
-
-### Deploy
-
-```shell
-$ forge script script/Counter.s.sol:CounterScript --rpc-url <your_rpc_url> --private-key <your_private_key>
-```
-
-### Cast
-
-```shell
-$ cast <subcommand>
-```
-
-### Help
-
-```shell
-$ forge --help
-$ anvil --help
-$ cast --help
-```
+MIT (pending - to be added)
