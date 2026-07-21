@@ -1,0 +1,98 @@
+// RESEARCH SPIKE (deviation 1 / plan M10): a factory that actually DEPLOYS
+// KodylEvent instances from on-chain, restoring the original createEvent.
+//
+// Core Solidity cannot reference a sibling contract's initcode, so the
+// initcode is delivered via a STENCIL: a helper contract whose RUNTIME code
+// IS KodylEvent's initcode (deployed off-line with a 13-byte returner
+// prefix; see test/core/CoreKodylFactoryV2.t.sol). createEvent copies the
+// stencil's code, appends the ABI-encoded constructor arguments exactly as
+// Solidity does, and CREATE2s the result.
+//
+// There is no precedent for any of this in the solcore corpus - that is the
+// point of the spike.
+import std.{*};
+import std.opcodes.{shr, shl, mstore, mload, keccak256 as rawKeccak,
+                    extcodesize, extcodecopy, create2, timestamp};
+import std.dispatch.{*};
+import lib.kodyl.{*};
+
+contract KodylFactoryV2 {
+    maintainer : address;
+    stencil : address;
+    eventCount : uint256;
+    eventsArr : array(address);
+    isKodylEventMap : mapping(address, bool);
+
+    constructor(maintainer_ : address, stencil_ : address) {
+        if (Typedef.rep(maintainer_) == 0) {
+            revertStr1(shr(224, keccakLit("InvalidEventParameters(string)")), 12,
+                       0x5a65726f20616464726573730000000000000000000000000000000000000000);
+        }
+        maintainer = maintainer_;
+        stencil = stencil_;
+    }
+
+    public function maintainer() -> address { return maintainer; }
+    public function stencil() -> address { return stencil; }
+    public function eventCount() -> uint256 { return eventCount; }
+    public function events(i : uint256) -> address { return eventsArr[i]; }
+    public function isKodylEvent(a : address) -> bool { return isKodylEventMap[a]; }
+
+    // Salt packing mirrors the source's
+    // keccak256(abi.encodePacked(msg.sender, eventStart, block.timestamp, eventCount)):
+    // 20 address bytes then three full words (116 bytes).
+    function computeSalt(eventStart : uint256) -> word {
+        let p = get_free_memory();
+        mstore(p, shl(96, Typedef.rep(caller())));
+        mstore(p + 20, Typedef.rep(eventStart));
+        mstore(p + 52, timestamp());
+        mstore(p + 84, Typedef.rep(eventCount));
+        return rawKeccak(p, 116);
+    }
+
+    public function createEvent(
+        depositAmount : uint256,
+        cancellationDeadline : uint256,
+        eventStart : uint256,
+        eventEnd : uint256,
+        disputePeriod : uint256,
+        maxAttendees : uint256,
+        metadataURI : memory(string)
+    ) -> address {
+        validateEventParams(depositAmount, cancellationDeadline, eventStart, eventEnd, disputePeriod);
+
+        let salt = computeSalt(eventStart);
+
+        // Copy KodylEvent's initcode out of the stencil's runtime code.
+        let size = extcodesize(Typedef.rep(stencil));
+        let ptr = allocate_memory(size);
+        extcodecopy(Typedef.rep(stencil), ptr, 0, size);
+
+        // ABI-encode the 9 constructor arguments directly after the initcode:
+        // allocate_memory advanced the free pointer to ptr+size, so abi_encode
+        // writes contiguously - initcode ++ abi.encode(args), the exact layout
+        // sol-core's generated initcode decodes (and Solidity uses).
+        let enc = abi_encode((self(), caller(), depositAmount,
+                              cancellationDeadline, eventStart, eventEnd,
+                              disputePeriod, maxAttendees, metadataURI));
+        let total = get_free_memory() - ptr;
+
+        let evtW = create2(0, ptr, total, salt);
+        if (evtW == 0) {
+            require(false, Error(shr(224, keccakLit("TransferFailed()"))));
+        }
+        let evt = address(evtW);
+
+        ArrayPush.push(eventsArr, evt);
+        isKodylEventMap[evt] = true;
+        eventCount = eventCount + uint256(1);
+
+        solAssert(eventCount == Array.length(eventsArr));
+        solAssert(isKodylEventMap[evt]);
+
+        emitAddr2Amt3(keccakLit("EventCreated(address,address,uint256,uint256,uint256)"),
+                      evt, caller(), depositAmount, eventStart, eventEnd);
+
+        return evt;
+    }
+}
