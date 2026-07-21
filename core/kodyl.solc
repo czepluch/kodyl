@@ -1,0 +1,237 @@
+// Shared helpers for the Kodyl Core Solidity port. Imported by both
+// KodylEvent.solc and KodylFactory.solc as `import lib.kodyl.{*};`.
+import std.{*};
+import std.opcodes.{caller as caller_, callvalue as callvalue_, timestamp, selfbalance,
+                    address as address_,
+                    gas, call, shr, mstore, mload, revert as revert_,
+                    log1 as log1_, log2 as log2_, log3 as log3_};
+
+export {
+    caller,
+    self,
+    caller_value,
+    timeNow,
+    balanceSelf,
+    panic,
+    solAssert,
+    addCk,
+    subCk,
+    mulCk,
+    revertWith2,
+    revertStr1,
+    revertStr2,
+    sendValue,
+    readWordFrom,
+    emitBare,
+    emitAddr,
+    emitAddrAmt,
+    emitAddr2,
+    emitAddr2Amt3,
+    emitStr,
+    validateEventParams
+};
+
+// --- environment ---
+
+function caller() -> address {
+    return address(caller_());
+}
+
+function self() -> address {
+    return address(address_());
+}
+
+function caller_value() -> uint256 {
+    return uint256(callvalue_());
+}
+
+function timeNow() -> uint256 {
+    return uint256(timestamp());
+}
+
+function balanceSelf() -> uint256 {
+    return uint256(selfbalance());
+}
+
+// --- Solidity 0.8 semantics shims ---
+// Core Solidity arithmetic wraps and its assert hits the invalid opcode, so
+// Panic(uint256) reverts are reproduced by hand exactly where the Solidity
+// source relied on checked math (deviation 5).
+
+function panic(code : word) -> () {
+    let p = get_free_memory();
+    mstore(p, 0x4e487b71); // Panic(uint256) selector, right-aligned in the word
+    mstore(p + 32, code);
+    revert_(p + 28, 36);
+}
+
+function solAssert(cond : bool) -> () {
+    if (!cond) { panic(0x01); }
+}
+
+function addCk(x : uint256, y : uint256) -> uint256 {
+    let r = x + y;
+    if (r < x) { panic(0x11); }
+    return r;
+}
+
+function subCk(x : uint256, y : uint256) -> uint256 {
+    if (y > x) { panic(0x11); }
+    return x - y;
+}
+
+function mulCk(x : uint256, y : uint256) -> uint256 {
+    if (x == uint256(0)) { return uint256(0); }
+    let r = x * y;
+    if (r / x != y) { panic(0x11); }
+    return r;
+}
+
+// --- revert payload builders ---
+// Errors WITH arguments need hand-built payloads matching abi.encodeWithSelector:
+// right-aligned 4-byte selector followed by 32-byte words. Selectors are derived
+// in place at call sites via shr(224, keccakLit("Sig(...)")), which folds at
+// compile time for literal arguments.
+
+function revertWith2(sel : word, a : word, b : word) -> () {
+    let p = get_free_memory();
+    mstore(p, sel);      // selector occupies bytes p+28..p+31
+    mstore(p + 32, a);
+    mstore(p + 64, b);
+    revert_(p + 28, 68);
+}
+
+// Error(string)-shaped revert: selector ++ abi.encode(string) for a reason that
+// packs into one 32-byte word (string literals are compile-time-only in Core
+// Solidity, so the packed word and length are precomputed constants).
+function revertStr1(sel : word, len : word, w0 : word) -> () {
+    let p = get_free_memory();
+    mstore(p, sel);
+    mstore(p + 32, 32);  // offset of the string head
+    mstore(p + 64, len);
+    mstore(p + 96, w0);
+    revert_(p + 28, 100);
+}
+
+// Same, for reasons spanning two words.
+function revertStr2(sel : word, len : word, w0 : word, w1 : word) -> () {
+    let p = get_free_memory();
+    mstore(p, sel);
+    mstore(p + 32, 32);
+    mstore(p + 64, len);
+    mstore(p + 96, w0);
+    mstore(p + 128, w1);
+    revert_(p + 28, 132);
+}
+
+// --- event parameter validation ---
+// Shared by KodylFactory (registry) and the createEvent spike. Guard order and
+// InvalidEventParameters(string) payloads are byte-identical to the Solidity
+// _validateEventParameters; reason strings are precomputed packed words
+// (deviation 10), plain text in the comments.
+
+function validateEventParams(
+    depositAmount : uint256,
+    cancellationDeadline : uint256,
+    eventStart : uint256,
+    eventEnd : uint256,
+    disputePeriod : uint256
+) -> () {
+    let sel = shr(224, keccakLit("InvalidEventParameters(string)"));
+    if (depositAmount == uint256(0)) {
+        // "Deposit must be > 0"
+        revertStr1(sel, 19, 0x4465706f736974206d757374206265203e203000000000000000000000000000);
+    }
+    if (eventStart <= timeNow()) {
+        // "Event must start in future"
+        revertStr1(sel, 26, 0x4576656e74206d75737420737461727420696e20667574757265000000000000);
+    }
+    if (eventEnd <= eventStart) {
+        // "Event end must be after start"
+        revertStr1(sel, 29, 0x4576656e7420656e64206d757374206265206166746572207374617274000000);
+    }
+    // Written as an addition (not eventStart - buffer) so it cannot underflow
+    // for near-term events; addCk keeps 0.8 checked semantics.
+    if (addCk(cancellationDeadline, uint256(7200)) > eventStart) {
+        // "Cancellation deadline too late"
+        revertStr1(sel, 30, 0x43616e63656c6c6174696f6e20646561646c696e6520746f6f206c6174650000);
+    }
+    if (cancellationDeadline <= timeNow()) {
+        // "Cancellation deadline must be in future"
+        revertStr2(sel, 39,
+                   0x43616e63656c6c6174696f6e20646561646c696e65206d75737420626520696e,
+                   0x2066757475726500000000000000000000000000000000000000000000000000);
+    }
+    if (disputePeriod < uint256(3600)) {
+        // "Dispute period too short"
+        revertStr1(sel, 24, 0x4469737075746520706572696f6420746f6f2073686f72740000000000000000);
+    }
+    if (disputePeriod > uint256(2592000)) {
+        // "Dispute period too long"
+        revertStr1(sel, 23, 0x4469737075746520706572696f6420746f6f206c6f6e67000000000000000000);
+    }
+}
+
+// --- ETH transfer (weth9 pattern) ---
+
+function sendValue(dst : address, wad : uint256) -> () {
+    let ret = call(gas(), Typedef.rep(dst), Typedef.rep(wad), 0, 0, 0, 0);
+    require(ret != 0, Error(shr(224, keccakLit("TransferFailed()"))));
+}
+
+// --- cross-contract reads ---
+// std raw_call with a 4-byte selector payload (basic.solc idiom). Uses CALL
+// where solc emits STATICCALL for view calls, and a failed call reverts empty
+// instead of bubbling returndata (deviation 7).
+
+function readWordFrom(target : address, sel : bytes32) -> word {
+    let payload = truncate(to_bytes(sel), 4);
+    match raw_call(target, uint256(0), payload) {
+    | (ok, ret) =>
+        if (!ok) { revertEmpty(); }
+        return mload(Typedef.rep(ret) + 32);
+    }
+}
+
+// --- event emission (no emit sugar in the language; topics via keccakLit) ---
+
+// event E(): topic0 only.
+function emitBare(t0 : word) -> () {
+    log1_(0, 0, t0);
+}
+
+// event E(address indexed a): no data.
+function emitAddr(t0 : word, a : address) -> () {
+    log2_(0, 0, t0, Typedef.rep(a));
+}
+
+// event E(address indexed a, uint256 v): one data word.
+function emitAddrAmt(t0 : word, a : address, v : uint256) -> () {
+    let p = get_free_memory();
+    mstore(p, Typedef.rep(v));
+    log2_(p, 32, t0, Typedef.rep(a));
+}
+
+// event E(address indexed a, address indexed b): no data.
+function emitAddr2(t0 : word, a : address, b : address) -> () {
+    log3_(0, 0, t0, Typedef.rep(a), Typedef.rep(b));
+}
+
+// event E(address indexed a, address indexed b, uint256 x, uint256 y, uint256 z).
+function emitAddr2Amt3(t0 : word, a : address, b : address,
+                       x : uint256, y : uint256, z : uint256) -> () {
+    let p = get_free_memory();
+    mstore(p, Typedef.rep(x));
+    mstore(p + 32, Typedef.rep(y));
+    mstore(p + 64, Typedef.rep(z));
+    log3_(p, 96, t0, Typedef.rep(a), Typedef.rep(b));
+}
+
+// event E(string s): data = abi.encode(s). abi_encode returns a pointer to the
+// encoded head and advances free memory to the tail, so the byte length is
+// get_free_memory() - start (the dispatch return-encoding idiom).
+function emitStr(t0 : word, s : memory(string)) -> () {
+    let enc = abi_encode(s);
+    let start = Typedef.rep(enc);
+    log1_(start, get_free_memory() - start, t0);
+}
