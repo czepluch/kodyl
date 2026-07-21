@@ -62,7 +62,9 @@ interface IKodylFactory {
     /// @param metadataURI IPFS hash or URL for event details
     /// @return eventContract Address of the deployed KodylEvent contract
     /// @dev Validates parameters:
-    ///      - cancellationDeadline >= 2 hours before eventStart
+    ///      - cancellationDeadline at least 2 hours before eventStart
+    ///        (cancellationDeadline + 2h <= eventStart)
+    ///      - cancellationDeadline in the future
     ///      - eventStart < eventEnd
     ///      - eventStart > block.timestamp
     ///      - depositAmount > 0

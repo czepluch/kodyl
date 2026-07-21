@@ -170,6 +170,34 @@ contract KodylEvent is IKodylEvent {
     }
 
     /// @inheritdoc IKodylEvent
+    function claimRefund() external {
+        // ===== Function Requirements (F) =====
+        // Only meaningful once the organizer has cancelled the event. Because
+        // cancelEvent() is restricted to the Registration state, no attendee can
+        // ever be CheckedIn on a cancelled event, so a Registered status is the
+        // only one eligible for a refund here.
+        if (!cancelled) revert EventNotCancelled();
+        if (attendees[msg.sender] != AttendeeStatus.Registered) {
+            revert InvalidAttendeeStatus(attendees[msg.sender], AttendeeStatus.Registered);
+        }
+
+        // ===== Effects (E) =====
+        attendees[msg.sender] = AttendeeStatus.Cancelled;
+        unchecked {
+            --registeredCount;
+        }
+
+        // ===== Interactions (I) =====
+        (bool success,) = payable(msg.sender).call{value: depositAmount}("");
+        if (!success) revert TransferFailed();
+
+        // ===== Protocol Invariants (PI) =====
+        assert(address(this).balance == registeredCount * depositAmount);
+
+        emit RefundClaimed(msg.sender, depositAmount);
+    }
+
+    /// @inheritdoc IKodylEvent
     function claim() external {
         // ===== Function Requirements (F) =====
         if (getState() != State.Settled) revert NotSettled();
