@@ -1,0 +1,21 @@
+// M0 toolchain probe: exercises constructor args, storage, dispatch, and an
+// opcode wrapper end-to-end. Kept as a minimal worked example of the pipeline.
+import std.{*};
+import std.opcodes.{timestamp};
+import std.dispatch.{*};
+
+contract Probe {
+    stored : uint256;
+
+    constructor(x : uint256) {
+        stored = x;
+    }
+
+    public function get() -> uint256 {
+        return stored;
+    }
+
+    public function timeNow() -> uint256 {
+        return uint256(timestamp());
+    }
+}
