@@ -155,8 +155,10 @@ contract KodylFactory is IKodylFactory {
             revert InvalidEventParameters("Event end must be after start");
         }
 
-        // Cancellation deadline must be at least 2 hours before event
-        if (cancellationDeadline < eventStart - MIN_CANCELLATION_BUFFER) {
+        // Cancellation deadline must be at least 2 hours before the event starts.
+        // Written as an addition (not `eventStart - MIN_CANCELLATION_BUFFER`) so it
+        // cannot underflow for near-term events.
+        if (cancellationDeadline + MIN_CANCELLATION_BUFFER > eventStart) {
             revert InvalidEventParameters("Cancellation deadline too late");
         }
 

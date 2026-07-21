@@ -56,6 +56,12 @@ interface IKodylEvent {
     /// @param amount Amount of dust claimed
     event DustClaimed(address indexed recipient, uint256 amount);
 
+    /// @notice Emitted when a registered attendee reclaims their deposit after
+    ///         the organizer cancelled the event
+    /// @param attendee Address receiving the refund
+    /// @param amount Refunded deposit amount
+    event RefundClaimed(address indexed attendee, uint256 amount);
+
     // ============ Errors ============
 
     /// @notice Thrown when caller is not the organizer
@@ -96,6 +102,9 @@ interface IKodylEvent {
 
     /// @notice Thrown when ETH transfer fails
     error TransferFailed();
+
+    /// @notice Thrown when a refund is attempted on an event that was not cancelled
+    error EventNotCancelled();
 
     // ============ View Functions ============
 
@@ -159,6 +168,10 @@ interface IKodylEvent {
     /// @notice Cancel registration and receive immediate refund
     /// @dev Reverts if past cancellation deadline or not registered
     function cancel() external;
+
+    /// @notice Reclaim a deposit after the organizer cancelled the event
+    /// @dev Reverts if the event was not cancelled or caller is not registered
+    function claimRefund() external;
 
     /// @notice Claim deposit plus reward after settlement
     /// @dev Reverts if not settled or not checked in
