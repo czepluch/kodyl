@@ -336,6 +336,13 @@ contract Kodyl {
             statusM[eid][caller()] = AttendeeStatus.Claimed;
             clmCountM[eid] = clmCountM[eid] + uint256(1);
             let payout = addCk(dep, calcReward(eid, dep));
+            // During normal settlement the pot always covers every remaining
+            // payout, so payout > held can only mean the pot was already swept
+            // to the maintainer after DUST_CLAIM_TIMEOUT. Report that plainly
+            // instead of letting subCk underflow into an opaque Panic(0x11).
+            if (payout > heldM[eid]) {
+                require(false, Error(shr(224, keccakLit("PayoutSwept()"))));
+            }
             heldM[eid] = subCk(heldM[eid], payout);
             totalHeld = subCk(totalHeld, payout);
 

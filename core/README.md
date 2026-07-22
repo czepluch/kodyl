@@ -93,7 +93,9 @@ function.
 - `EventAlreadyStarted` covers every non-Registration state for
   `cancelEvent` (including already-cancelled), instead of a dedicated error.
 - After `DUST_CLAIM_TIMEOUT`, unclaimed payouts sweep to the maintainer with
-  the dust (spec.md leaves late-claimer behavior after timeout implicit).
+  the dust (spec.md leaves late-claimer behavior after timeout implicit). A
+  checked-in attendee who claims after that sweep is told plainly: `claim`
+  reverts `PayoutSwept()` rather than underflowing into an opaque panic.
 - `disputePeriod` is validated to `[1 hour, 30 days]`. spec.md gives only a
   default (24h) and no bounds; the range is deliberate defensive validation
   (a zero window would strand late-but-present attendees, an unbounded one

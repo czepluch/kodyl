@@ -46,6 +46,8 @@ contract ReentrantAttacker {
 }
 
 contract KodylAccountingTest is Test {
+    error PayoutSwept();
+
     uint256 internal constant START_TS = 1_700_000_000;
 
     address internal maintainer = makeAddr("maintainer");
@@ -289,10 +291,10 @@ contract KodylAccountingTest is Test {
         assertEq(k.totalHeld(), 0);
         assertEq(address(k).balance, 0);
 
-        // A late claim now has no funds behind it and must revert (no ETH
-        // conjured). It surfaces as a checked-arithmetic panic, not a payout.
+        // A late claim now has no funds behind it and must revert with a clear
+        // named error (not an opaque panic, and no ETH conjured).
         vm.prank(alice);
-        vm.expectRevert(); // Panic(0x11) from subCk(held=0, payout)
+        vm.expectRevert(PayoutSwept.selector);
         k.claim(eid);
         assertEq(address(k).balance, 0);
     }
