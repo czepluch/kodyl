@@ -56,7 +56,7 @@ contract KodylEventTest is Test {
         e = _deploy(0); // unlimited capacity
     }
 
-    function _deploy(uint256 maxAttendees) internal virtual returns (KodylEvent) {
+    function _deploy(uint256 maxAttendees) internal returns (KodylEvent) {
         return new KodylEvent(
             address(factory),
             organizer,

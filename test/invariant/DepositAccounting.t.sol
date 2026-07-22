@@ -44,9 +44,12 @@ contract DepositAccountingInvariant is Test {
     uint256 internal constant DEPOSIT = 1 ether;
     uint256 internal constant START_TS = 1_700_000_000;
 
-    function _deployEvent(uint256 eventStart) internal virtual returns (KodylEvent) {
+    function setUp() public {
+        vm.warp(START_TS);
+
+        uint256 eventStart = START_TS + 30 days;
         // register/cancel never touch the factory, so a placeholder address is fine.
-        return new KodylEvent(
+        e = new KodylEvent(
             address(0xF00),
             makeAddr("organizer"),
             DEPOSIT,
@@ -57,13 +60,6 @@ contract DepositAccountingInvariant is Test {
             0,
             "ipfs://meta"
         );
-    }
-
-    function setUp() public {
-        vm.warp(START_TS);
-
-        uint256 eventStart = START_TS + 30 days;
-        e = _deployEvent(eventStart);
 
         address[] memory actors = new address[](5);
         for (uint256 i = 0; i < 5; ++i) {
