@@ -1,14 +1,14 @@
-// Shared helpers for the Kodyl Core Solidity port. Imported by both
-// KodylEvent.solc and KodylFactory.solc as `import lib.kodyl.{*};`.
+// Shared helpers for the Kodyl Core Solidity implementation, imported as
+// `import lib.kodyl.{*};`. Each function here is a piece of infrastructure the
+// language does not provide yet (checked math, error/event codegen, env
+// globals); the protocol itself lives in Kodyl.solc.
 import std.{*};
 import std.opcodes.{caller as caller_, callvalue as callvalue_, timestamp, selfbalance,
-                    address as address_,
-                    gas, call, shr, mstore, mload, revert as revert_,
+                    gas, call, shr, mstore, revert as revert_,
                     log1 as log1_, log2 as log2_, log3 as log3_};
 
 export {
     caller,
-    self,
     caller_value,
     timeNow,
     balanceSelf,
@@ -21,13 +21,12 @@ export {
     revertStr1,
     revertStr2,
     sendValue,
-    readWordFrom,
-    emitBare,
-    emitAddr,
-    emitAddrAmt,
-    emitAddr2,
-    emitAddr2Amt3,
-    emitStr,
+    emitLog1,
+    emitLog2,
+    emitLog3,
+    emitLog3W1,
+    emitLog3W3,
+    emitLog2Str,
     validateEventParams
 };
 
@@ -35,10 +34,6 @@ export {
 
 function caller() -> address {
     return address(caller_());
-}
-
-function self() -> address {
-    return address(address_());
 }
 
 function caller_value() -> uint256 {
@@ -179,59 +174,48 @@ function sendValue(dst : address, wad : uint256) -> () {
     require(ret != 0, Error(shr(224, keccakLit("TransferFailed()"))));
 }
 
-// --- cross-contract reads ---
-// std raw_call with a 4-byte selector payload (basic.solc idiom). Uses CALL
-// where solc emits STATICCALL for view calls, and a failed call reverts empty
-// instead of bubbling returndata (deviation 7).
+// --- event emission (no emit sugar in the language) ---
+// Generic over topics: callers pass raw words (Typedef.rep their values) and
+// derive topic0 in place with compile-time-folded keccakLit of the canonical
+// signature, so no hash constants appear anywhere in the sources.
 
-function readWordFrom(target : address, sel : bytes32) -> word {
-    let payload = truncate(to_bytes(sel), 4);
-    match raw_call(target, uint256(0), payload) {
-    | (ok, ret) =>
-        if (!ok) { revertEmpty(); }
-        return mload(Typedef.rep(ret) + 32);
-    }
-}
-
-// --- event emission (no emit sugar in the language; topics via keccakLit) ---
-
-// event E(): topic0 only.
-function emitBare(t0 : word) -> () {
+// E() anonymous-data-free: topic0 only.
+function emitLog1(t0 : word) -> () {
     log1_(0, 0, t0);
 }
 
-// event E(address indexed a): no data.
-function emitAddr(t0 : word, a : address) -> () {
-    log2_(0, 0, t0, Typedef.rep(a));
+// E(x indexed): one topic, no data.
+function emitLog2(t0 : word, t1 : word) -> () {
+    log2_(0, 0, t0, t1);
 }
 
-// event E(address indexed a, uint256 v): one data word.
-function emitAddrAmt(t0 : word, a : address, v : uint256) -> () {
+// E(x indexed, y indexed): two topics, no data.
+function emitLog3(t0 : word, t1 : word, t2 : word) -> () {
+    log3_(0, 0, t0, t1, t2);
+}
+
+// E(x indexed, y indexed, z): two topics, one data word.
+function emitLog3W1(t0 : word, t1 : word, t2 : word, d0 : word) -> () {
     let p = get_free_memory();
-    mstore(p, Typedef.rep(v));
-    log2_(p, 32, t0, Typedef.rep(a));
+    mstore(p, d0);
+    log3_(p, 32, t0, t1, t2);
 }
 
-// event E(address indexed a, address indexed b): no data.
-function emitAddr2(t0 : word, a : address, b : address) -> () {
-    log3_(0, 0, t0, Typedef.rep(a), Typedef.rep(b));
-}
-
-// event E(address indexed a, address indexed b, uint256 x, uint256 y, uint256 z).
-function emitAddr2Amt3(t0 : word, a : address, b : address,
-                       x : uint256, y : uint256, z : uint256) -> () {
+// E(x indexed, y indexed, a, b, c): two topics, three data words.
+function emitLog3W3(t0 : word, t1 : word, t2 : word,
+                    d0 : word, d1 : word, d2 : word) -> () {
     let p = get_free_memory();
-    mstore(p, Typedef.rep(x));
-    mstore(p + 32, Typedef.rep(y));
-    mstore(p + 64, Typedef.rep(z));
-    log3_(p, 96, t0, Typedef.rep(a), Typedef.rep(b));
+    mstore(p, d0);
+    mstore(p + 32, d1);
+    mstore(p + 64, d2);
+    log3_(p, 96, t0, t1, t2);
 }
 
-// event E(string s): data = abi.encode(s). abi_encode returns a pointer to the
-// encoded head and advances free memory to the tail, so the byte length is
-// get_free_memory() - start (the dispatch return-encoding idiom).
-function emitStr(t0 : word, s : memory(string)) -> () {
+// E(x indexed, string s): one topic, data = abi.encode(s). abi_encode returns
+// a pointer to the encoded head and advances free memory to the tail, so the
+// byte length is get_free_memory() - start (the dispatch return-size idiom).
+function emitLog2Str(t0 : word, t1 : word, s : memory(string)) -> () {
     let enc = abi_encode(s);
     let start = Typedef.rep(enc);
-    log1_(start, get_free_memory() - start, t0);
+    log2_(start, get_free_memory() - start, t0, t1);
 }

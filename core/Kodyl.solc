@@ -1,0 +1,491 @@
+// Kodyl, implemented natively in Core Solidity.
+//
+// The concept (spec.md): attendees stake a deposit to register for an event,
+// checked-in attendees reclaim it plus a pro-rata share of no-show
+// forfeitures, leftover dust goes to a maintainer.
+//
+// Where Solidity's natural unit of isolation is a contract instance (hence
+// the classic factory-deploys-one-contract-per-event architecture), Core
+// Solidity's natural unit is a value in a typed map. So this is a singleton:
+// an event is a payload-carrying ADT stored behind an id, "deployment" is a
+// state write, and the missing-event case is a constructor the type system
+// forces every consumer to handle. One consequence is shared custody: all
+// deposits live in one contract balance, tracked by a per-event ledger
+// (held) plus a global one (totalHeld), with the invariant
+// balance >= totalHeld asserted after every ETH movement. The direction is
+// >=, not ==: forced ETH (selfdestruct / block-reward payments) can push the
+// balance above the ledger and cannot be rejected, so == would let 1 wei
+// permanently brick every flow. The surplus is simply unowned and stuck.
+import std.{*};
+import std.opcodes.{callvalue as callvalue_, shr, calldatasize, calldataload};
+import std.dispatch.{*};
+import std.Generic.{*};
+import std.StorageGeneric.{*};
+import lib.kodyl.{*};
+
+// --- ADTs ---
+
+// Lifecycle state, derived from timestamps (never stored).
+data State = Registration | Active | Dispute | Settled | Cancelled;
+
+// Stored per (event, attendee). None is declared first so an unset mapping
+// key (the all-zero slot pattern) reads back as None.
+data AttendeeStatus = None | Registered | Cancelled | CheckedIn | Claimed;
+
+// An event: either absent, or its immutable parameters. NoEvent is first so
+// an unset id reads back as NoEvent, and exhaustive matching forces every
+// function to decide what a missing event means.
+// Fields: organizer, depositAmount, cancellationDeadline, eventStart,
+//         eventEnd, disputePeriod, maxAttendees (0 = unlimited).
+data EventRec = NoEvent
+             | Ev(address, uint256, uint256, uint256, uint256, uint256, uint256);
+
+// --- ordinals (ADTs stay Solidity-compatible at the ABI boundary) ---
+
+function stateOrd(s : State) -> uint256 {
+    match s {
+    | State.Registration => return uint256(0);
+    | State.Active       => return uint256(1);
+    | State.Dispute      => return uint256(2);
+    | State.Settled      => return uint256(3);
+    | State.Cancelled    => return uint256(4);
+    }
+}
+
+function statusOrd(s : AttendeeStatus) -> uint256 {
+    match s {
+    | AttendeeStatus.None       => return uint256(0);
+    | AttendeeStatus.Registered => return uint256(1);
+    | AttendeeStatus.Cancelled  => return uint256(2);
+    | AttendeeStatus.CheckedIn  => return uint256(3);
+    | AttendeeStatus.Claimed    => return uint256(4);
+    }
+}
+
+// Pure state derivation: cancellation dominates, otherwise the clock decides.
+function deriveState(isCancelled : bool, eventStart : uint256, eventEnd : uint256,
+                     disputePeriod : uint256) -> State {
+    if (isCancelled) { return State.Cancelled; }
+    let t = timeNow();
+    if (t < eventStart) { return State.Registration; }
+    if (t <= eventEnd) { return State.Active; }
+    if (t <= addCk(eventEnd, disputePeriod)) { return State.Dispute; }
+    return State.Settled;
+}
+
+function revertNotFound() -> () {
+    require(false, Error(shr(224, keccakLit("EventNotFound()"))));
+}
+
+// Check-ins are valid only in Active or Dispute. Gating on the derived state
+// (rather than a raw time window) also rejects check-ins on a cancelled event,
+// where the state is Cancelled - otherwise an attendee could be flipped to
+// CheckedIn and then never recover their deposit.
+function requireCheckInOpen(isCancelled : bool, start : uint256, end_ : uint256,
+                            dispute : uint256) -> () {
+    let s = stateOrd(deriveState(isCancelled, start, end_, dispute));
+    if (s != uint256(1) && s != uint256(2)) {
+        require(false, Error(shr(224, keccakLit("CheckInWindowClosed()"))));
+    }
+}
+
+// Exhaustive registration gate: the type system forces a decision for every
+// status. None and Cancelled may (re-)register; everything else names its
+// own failure.
+function registerGuard(st : AttendeeStatus) -> () {
+    match st {
+    | AttendeeStatus.None      => return ();
+    | AttendeeStatus.Cancelled => return ();
+    | AttendeeStatus.Registered =>
+        require(false, Error(shr(224, keccakLit("AlreadyRegistered()"))));
+    | AttendeeStatus.CheckedIn =>
+        revertWith2(shr(224, keccakLit("InvalidAttendeeStatus(uint8,uint8)")), 3, 0);
+    | AttendeeStatus.Claimed =>
+        revertWith2(shr(224, keccakLit("InvalidAttendeeStatus(uint8,uint8)")), 4, 0);
+    }
+}
+
+function requireStatus(st : AttendeeStatus, expected : word) -> () {
+    let cur = Typedef.rep(statusOrd(st));
+    if (cur != expected) {
+        revertWith2(shr(224, keccakLit("InvalidAttendeeStatus(uint8,uint8)")), cur, expected);
+    }
+}
+
+function onlyOrganizerOf(org : address) -> () {
+    if (caller() != org) {
+        require(false, Error(shr(224, keccakLit("NotOrganizer()"))));
+    }
+}
+
+contract Kodyl {
+    maintainer : address;
+    eventCount : uint256;
+    // Global deposit ledger: the contract balance must be at least this after
+    // every ETH movement (the singleton generalization of spec.md invariant 1).
+    totalHeld : uint256;
+
+    // Per-event state, keyed by eventId (1..eventCount; id 0 is never used,
+    // so the NoEvent zero pattern is unreachable for real ids).
+    eventsRec : mapping(uint256, EventRec);
+    // Sequential ids make an array the natural container; ids are 1-based so
+    // the URI for event eid lives at index eid - 1.
+    metadataUris : array(string);
+    cancelledM : mapping(uint256, bool);
+    statusM : mapping(uint256, mapping(address, AttendeeStatus));
+    regCountM : mapping(uint256, uint256);
+    chkCountM : mapping(uint256, uint256);
+    clmCountM : mapping(uint256, uint256);
+    // Per-event pot: deposits in, refunds/payouts/dust out. Makes dust exact
+    // per event instead of relying on the (shared) contract balance.
+    heldM : mapping(uint256, uint256);
+
+    constructor(maintainer_ : address) {
+        if (Typedef.rep(maintainer_) == 0) {
+            revertStr1(shr(224, keccakLit("InvalidEventParameters(string)")), 12,
+                       0x5a65726f20616464726573730000000000000000000000000000000000000000);
+        }
+        maintainer = maintainer_;
+    }
+
+    // --- event creation: a state write, not a deployment ---
+
+    public function createEvent(
+        depositAmount : uint256,
+        cancellationDeadline : uint256,
+        eventStart : uint256,
+        eventEnd : uint256,
+        disputePeriod : uint256,
+        maxAttendees : uint256,
+        metadataURI_ : memory(string)
+    ) -> uint256 {
+        validateEventParams(depositAmount, cancellationDeadline, eventStart, eventEnd, disputePeriod);
+
+        let eid = eventCount + uint256(1);
+        eventCount = eid;
+        eventsRec[eid] = EventRec.Ev(caller(), depositAmount, cancellationDeadline,
+                                     eventStart, eventEnd, disputePeriod, maxAttendees);
+        ArrayPush.push(metadataUris, metadataURI_);
+
+        emitLog3W3(keccakLit("EventCreated(uint256,address,uint256,uint256,uint256)"),
+                   Typedef.rep(eid), Typedef.rep(caller()),
+                   Typedef.rep(depositAmount), Typedef.rep(eventStart), Typedef.rep(eventEnd));
+
+        return eid;
+    }
+
+    // --- read surface ---
+
+    public function maintainer() -> address { return maintainer; }
+    public function eventCount() -> uint256 { return eventCount; }
+    public function totalHeld() -> uint256 { return totalHeld; }
+
+    // All seven parameters of an event in one call; reverts for unknown ids.
+    public function getEvent(eid : uint256)
+        -> (address, uint256, uint256, uint256, uint256, uint256, uint256) {
+        match eventsRec[eid] {
+        | EventRec.NoEvent =>
+            revertNotFound();
+            return (address(0), uint256(0), uint256(0), uint256(0), uint256(0), uint256(0), uint256(0));
+        | EventRec.Ev(org, dep, deadline, start, end_, dispute, cap) =>
+            return (org, dep, deadline, start, end_, dispute, cap);
+        }
+    }
+
+    public function organizer(eid : uint256) -> address {
+        match eventsRec[eid] {
+        | EventRec.NoEvent => revertNotFound(); return address(0);
+        | EventRec.Ev(org, dep, deadline, start, end_, dispute, cap) => return org;
+        }
+    }
+
+    public function getState(eid : uint256) -> uint256 {
+        match eventsRec[eid] {
+        | EventRec.NoEvent => revertNotFound(); return uint256(0);
+        | EventRec.Ev(org, dep, deadline, start, end_, dispute, cap) =>
+            return stateOrd(deriveState(cancelledM[eid], start, end_, dispute));
+        }
+    }
+
+    public function attendees(eid : uint256, a : address) -> uint256 {
+        return statusOrd(statusM[eid][a]);
+    }
+
+    public function metadataURI(eid : uint256) -> memory(string) {
+        match eventsRec[eid] {
+        | EventRec.NoEvent => revertNotFound(); return metadataUris[uint256(0)];
+        | EventRec.Ev(org, dep, deadline, start, end_, dispute, cap) =>
+            return metadataUris[eid - uint256(1)];
+        }
+    }
+
+    public function cancelled(eid : uint256) -> bool { return cancelledM[eid]; }
+    public function registeredCount(eid : uint256) -> uint256 { return regCountM[eid]; }
+    public function checkedInCount(eid : uint256) -> uint256 { return chkCountM[eid]; }
+    public function claimedCount(eid : uint256) -> uint256 { return clmCountM[eid]; }
+    public function held(eid : uint256) -> uint256 { return heldM[eid]; }
+
+    public function rewardPerAttendee(eid : uint256) -> uint256 {
+        match eventsRec[eid] {
+        | EventRec.NoEvent => revertNotFound(); return uint256(0);
+        | EventRec.Ev(org, dep, deadline, start, end_, dispute, cap) =>
+            return calcReward(eid, dep);
+        }
+    }
+
+    // Pro-rata share of forfeited no-show deposits per checked-in attendee.
+    function calcReward(eid : uint256, dep : uint256) -> uint256 {
+        let chk = chkCountM[eid];
+        if (chk == uint256(0)) { return uint256(0); }
+        let noShow = subCk(regCountM[eid], chk);
+        return mulCk(noShow, dep) / chk;
+    }
+
+    // Constants as functions: no constant keyword or time-unit sugar yet.
+    public function MAX_BATCH_SIZE() -> uint256 { return uint256(100); }
+    public function DUST_CLAIM_TIMEOUT() -> uint256 { return uint256(2592000); } // 30 days
+    public function MIN_CANCELLATION_BUFFER() -> uint256 { return uint256(7200); } // 2 hours
+
+    // --- attendee flow ---
+
+    public payable function register(eid : uint256) -> () {
+        match eventsRec[eid] {
+        | EventRec.NoEvent => revertNotFound();
+        | EventRec.Ev(org, dep, deadline, start, end_, dispute, cap) =>
+            if (stateOrd(deriveState(cancelledM[eid], start, end_, dispute)) != uint256(0)) {
+                require(false, Error(shr(224, keccakLit("RegistrationClosed()"))));
+            }
+            registerGuard(statusM[eid][caller()]);
+            if (caller_value() != dep) {
+                revertWith2(shr(224, keccakLit("IncorrectDeposit(uint256,uint256)")),
+                            Typedef.rep(dep), Typedef.rep(caller_value()));
+            }
+            if (cap > uint256(0) && regCountM[eid] >= cap) {
+                require(false, Error(shr(224, keccakLit("EventFull()"))));
+            }
+
+            statusM[eid][caller()] = AttendeeStatus.Registered;
+            regCountM[eid] = regCountM[eid] + uint256(1);
+            heldM[eid] = addCk(heldM[eid], dep);
+            totalHeld = addCk(totalHeld, dep);
+
+            solAssert(balanceSelf() >= totalHeld);
+
+            emitLog3(keccakLit("Registered(uint256,address)"),
+                     Typedef.rep(eid), Typedef.rep(caller()));
+        }
+    }
+
+    public function cancel(eid : uint256) -> () {
+        match eventsRec[eid] {
+        | EventRec.NoEvent => revertNotFound();
+        | EventRec.Ev(org, dep, deadline, start, end_, dispute, cap) =>
+            if (timeNow() > deadline) {
+                require(false, Error(shr(224, keccakLit("CancellationDeadlinePassed()"))));
+            }
+            requireStatus(statusM[eid][caller()], 1);
+
+            statusM[eid][caller()] = AttendeeStatus.Cancelled;
+            regCountM[eid] = regCountM[eid] - uint256(1);
+            heldM[eid] = subCk(heldM[eid], dep);
+            totalHeld = subCk(totalHeld, dep);
+
+            sendValue(caller(), dep);
+
+            solAssert(balanceSelf() >= totalHeld);
+
+            emitLog3(keccakLit("RegistrationCancelled(uint256,address)"),
+                     Typedef.rep(eid), Typedef.rep(caller()));
+        }
+    }
+
+    // Refund path once the organizer has cancelled: always available to
+    // registered attendees, regardless of the cancellation deadline.
+    public function claimRefund(eid : uint256) -> () {
+        match eventsRec[eid] {
+        | EventRec.NoEvent => revertNotFound();
+        | EventRec.Ev(org, dep, deadline, start, end_, dispute, cap) =>
+            if (!cancelledM[eid]) {
+                require(false, Error(shr(224, keccakLit("EventNotCancelled()"))));
+            }
+            requireStatus(statusM[eid][caller()], 1);
+
+            statusM[eid][caller()] = AttendeeStatus.Cancelled;
+            regCountM[eid] = regCountM[eid] - uint256(1);
+            heldM[eid] = subCk(heldM[eid], dep);
+            totalHeld = subCk(totalHeld, dep);
+
+            sendValue(caller(), dep);
+
+            solAssert(balanceSelf() >= totalHeld);
+
+            emitLog3W1(keccakLit("RefundClaimed(uint256,address,uint256)"),
+                       Typedef.rep(eid), Typedef.rep(caller()), Typedef.rep(dep));
+        }
+    }
+
+    public function claim(eid : uint256) -> () {
+        match eventsRec[eid] {
+        | EventRec.NoEvent => revertNotFound();
+        | EventRec.Ev(org, dep, deadline, start, end_, dispute, cap) =>
+            if (stateOrd(deriveState(cancelledM[eid], start, end_, dispute)) != uint256(3)) {
+                require(false, Error(shr(224, keccakLit("NotSettled()"))));
+            }
+            requireStatus(statusM[eid][caller()], 3);
+
+            statusM[eid][caller()] = AttendeeStatus.Claimed;
+            clmCountM[eid] = clmCountM[eid] + uint256(1);
+            let payout = addCk(dep, calcReward(eid, dep));
+            heldM[eid] = subCk(heldM[eid], payout);
+            totalHeld = subCk(totalHeld, payout);
+
+            sendValue(caller(), payout);
+
+            solAssert(balanceSelf() >= totalHeld);
+
+            emitLog3W1(keccakLit("Claimed(uint256,address,uint256)"),
+                       Typedef.rep(eid), Typedef.rep(caller()), Typedef.rep(payout));
+        }
+    }
+
+    // --- organizer flow ---
+
+    // Per-attendee status flip. The check-in window / cancelled gate is applied
+    // once by the callers (requireCheckInOpen). Silently skips anyone not
+    // currently Registered, so batches tolerate invalid entries.
+    function checkInInner(eid : uint256, a : address) -> () {
+        if (statusOrd(statusM[eid][a]) == uint256(1)) {
+            statusM[eid][a] = AttendeeStatus.CheckedIn;
+            chkCountM[eid] = chkCountM[eid] + uint256(1);
+            emitLog3(keccakLit("CheckedIn(uint256,address)"),
+                     Typedef.rep(eid), Typedef.rep(a));
+        }
+    }
+
+    public function checkIn(eid : uint256, a : address) -> () {
+        match eventsRec[eid] {
+        | EventRec.NoEvent => revertNotFound();
+        | EventRec.Ev(org, dep, deadline, start, end_, dispute, cap) =>
+            onlyOrganizerOf(org);
+            requireCheckInOpen(cancelledM[eid], start, end_, dispute);
+            checkInInner(eid, a);
+        }
+    }
+
+    public function cancelEvent(eid : uint256) -> () {
+        match eventsRec[eid] {
+        | EventRec.NoEvent => revertNotFound();
+        | EventRec.Ev(org, dep, deadline, start, end_, dispute, cap) =>
+            onlyOrganizerOf(org);
+            if (stateOrd(deriveState(cancelledM[eid], start, end_, dispute)) != uint256(0)) {
+                require(false, Error(shr(224, keccakLit("EventAlreadyStarted()"))));
+            }
+            cancelledM[eid] = true;
+            emitLog2(keccakLit("EventCancelled(uint256)"), Typedef.rep(eid));
+        }
+    }
+
+    public function setMetadataURI(eid : uint256, newUri : memory(string)) -> () {
+        match eventsRec[eid] {
+        | EventRec.NoEvent => revertNotFound();
+        | EventRec.Ev(org, dep, deadline, start, end_, dispute, cap) =>
+            onlyOrganizerOf(org);
+            metadataUris[eid - uint256(1)] = newUri;
+            emitLog2Str(keccakLit("MetadataUpdated(uint256,string)"),
+                        Typedef.rep(eid), newUri);
+        }
+    }
+
+    // --- dust ---
+
+    public function claimDust(eid : uint256) -> () {
+        match eventsRec[eid] {
+        | EventRec.NoEvent => revertNotFound();
+        | EventRec.Ev(org, dep, deadline, start, end_, dispute, cap) =>
+            if (stateOrd(deriveState(cancelledM[eid], start, end_, dispute)) != uint256(3)) {
+                require(false, Error(shr(224, keccakLit("NotSettled()"))));
+            }
+            let allClaimed = clmCountM[eid] == chkCountM[eid];
+            let timeoutPassed = timeNow() > addCk(addCk(end_, dispute), uint256(2592000));
+            if (!allClaimed && !timeoutPassed) {
+                require(false, Error(shr(224, keccakLit("DustNotClaimable()"))));
+            }
+            // The per-event pot IS the dust once every claim is out; no
+            // reliance on the shared contract balance.
+            let dust = heldM[eid];
+            if (dust == uint256(0)) {
+                require(false, Error(shr(224, keccakLit("DustNotClaimable()"))));
+            }
+            heldM[eid] = uint256(0);
+            totalHeld = subCk(totalHeld, dust);
+
+            sendValue(maintainer, dust);
+
+            solAssert(balanceSelf() >= totalHeld);
+
+            emitLog3W1(keccakLit("DustClaimed(uint256,address,uint256)"),
+                       Typedef.rep(eid), Typedef.rep(maintainer), Typedef.rep(dust));
+        }
+    }
+
+    // --- maintainer ---
+
+    public function setMaintainer(newMaintainer : address) -> () {
+        if (caller() != maintainer) {
+            require(false, Error(shr(224, keccakLit("NotAuthorized()"))));
+        }
+        if (Typedef.rep(newMaintainer) == 0) {
+            revertStr1(shr(224, keccakLit("InvalidEventParameters(string)")), 12,
+                       0x5a65726f20616464726573730000000000000000000000000000000000000000);
+        }
+        if (newMaintainer == maintainer) {
+            revertStr1(shr(224, keccakLit("InvalidEventParameters(string)")), 15,
+                       0x53616d65206d61696e7461696e65720000000000000000000000000000000000);
+        }
+        let old = maintainer;
+        maintainer = newMaintainer;
+        emitLog3(keccakLit("MaintainerUpdated(address,address)"),
+                 Typedef.rep(old), Typedef.rep(newMaintainer));
+    }
+
+    // --- fallback: stray-ETH rejection + checkInBatch manual dispatch ---
+
+    // checkInBatch(uint256,address[]) cannot be a typed public function (the
+    // std ABI decoder for dynamic arrays is a stub), so its calldata is
+    // decoded by hand here. Plain ETH transfers (empty calldata) and unknown
+    // selectors revert.
+    function checkInBatchImpl() -> () {
+        let eid = uint256(calldataload(4));
+        match eventsRec[eid] {
+        | EventRec.NoEvent => revertNotFound();
+        | EventRec.Ev(org, dep, deadline, start, end_, dispute, cap) =>
+            onlyOrganizerOf(org);
+            requireCheckInOpen(cancelledM[eid], start, end_, dispute);
+            let lenPtr = 4 + calldataload(36); // second arg head holds the array offset
+            let len = calldataload(lenPtr);
+            if (len > 100) {
+                revertWith2(shr(224, keccakLit("BatchTooLarge(uint256,uint256)")), len, 100);
+            }
+            for (let i : word = 0; i < len; i = i + 1) {
+                checkInInner(eid, address(calldataload(lenPtr + 32 + i * 32)));
+            }
+        }
+    }
+
+    payable fallback() -> () {
+        let sz = calldatasize();
+        if (sz == 0) {
+            require(false, Error(shr(224, keccakLit("TransferFailed()"))));
+        }
+        if (sz >= 4) {
+            if (shr(224, calldataload(0)) == shr(224, keccakLit("checkInBatch(uint256,address[])"))) {
+                if (callvalue_() != 0) {
+                    revertEmpty();
+                }
+                checkInBatchImpl();
+                return ();
+            }
+        }
+        revertEmpty();
+    }
+}

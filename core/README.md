@@ -1,100 +1,118 @@
-# Kodyl - Core Solidity port
+# Kodyl in Core Solidity
 
-A port of `src/KodylEvent.sol` and `src/KodylFactory.sol` to Core Solidity
-(`.solc`, the [solcore](https://github.com/argotorg/solcore) research
-language), as a showcase of the current state of the language. The Foundry
-suite under `test/unit` and `test/invariant` is the behavioral oracle;
-`test/core` re-runs it against the bytecode compiled from these sources.
+The Kodyl concept - stake a deposit to register for an event, checked-in
+attendees reclaim it plus a pro-rata share of no-show forfeitures, dust goes
+to a maintainer (see `spec.md`) - implemented natively in
+[Core Solidity](https://github.com/argotorg/solcore), designed around what
+the language does well today rather than mirroring the classic Solidity
+architecture in `src/`.
+
+## The design
+
+Classic Kodyl is a factory that deploys one contract per event, because a
+contract instance is Solidity's natural unit of state isolation. Core
+Solidity's natural unit is **a value in a typed map**, so this is a
+singleton:
+
+- An event is a payload-carrying ADT:
+  `data EventRec = NoEvent | Ev(organizer, deposit, deadline, start, end, dispute, cap)`
+  stored in `mapping(uint256, EventRec)`. "Deployment" is a state write;
+  createEvent returns a sequential id.
+- `NoEvent` is declared first, so an unset id reads back as `NoEvent` from
+  the zero slot pattern, and **exhaustive matching forces every function to
+  handle the missing-event case** - the type system does what address
+  checks do in Solidity.
+- Attendee status is the same idea one level down:
+  `mapping(uint256, mapping(address, AttendeeStatus))` with `None` first.
+- Lifecycle state is never stored; it is derived from timestamps by a pure
+  function and matched on.
+- Custody is shared (one contract balance), so accounting is explicit: a
+  per-event pot (`held`) plus a global ledger (`totalHeld`), with
+  `balance == totalHeld` asserted after every ETH movement. A side benefit:
+  per-event dust is exact - `claimDust` pays out the pot, not a balance
+  reading.
 
 ## Layout
 
-| File | Purpose |
+| File | Role |
 |---|---|
-| `KodylEvent.solc` | The event contract - full behavioral parity with the Solidity original |
-| `KodylFactory.solc` | The factory as a registry (see deviation 1) |
-| `KodylFactoryV2.solc` | Research spike, SUCCESSFUL: restores the real `createEvent` via the stencil pattern (deviation 1) |
-| `kodyl.solc` | Shared module (env wrappers, checked-math shims, revert/event builders, validation), imported as `lib.kodyl.{*}` |
-| `Probe.solc` | Minimal worked example of the pipeline |
+| `Kodyl.solc` | The whole protocol: one contract, ~29 entry points |
+| `kodyl.solc` | Shared module (`import lib.kodyl.{*}`): infrastructure the language does not provide yet - checked-math shims, revert/event builders, env wrappers, validation |
+| `Probe.solc` | Toolchain canary: minimal contract proving the pipeline end to end |
 | `build/` | Pipeline output (gitignored) |
+| `COVERAGE.md` | spec.md mechanics and invariants mapped to tests |
 
-## Building and testing
+Build and test:
 
 ```
-./scripts/check-core.sh          # .solc -> .hull (sol-core) -> .yul (yule) -> hex (solc)
+./scripts/check-core.sh          # sol-core -> yule -> solc, pinned toolchain
 forge test --match-path 'test/core/*'
 ```
 
-Toolchain is pinned in `scripts/check-core.sh` to the solcore checkout the
-installed `sol-core` was built from (`~/temp_dev/solcore`, rev `1d490d8b`).
-The forge tests deploy the produced initcode with ABI-appended constructor
-args (`test/core/CoreDeploy.sol`) and drive it through the ordinary Solidity
-interfaces - selectors, event topics, and revert payloads are all asserted
-byte-for-byte by the inherited oracle tests.
+`test/core/Kodyl.t.sol` (39 scenarios) and `test/core/KodylInvariant.t.sol`
+(128k-call ledger fuzz across three concurrent events) drive the compiled
+bytecode through a typed Solidity interface inside forge - selectors, event
+topics, and revert payloads are asserted byte-for-byte.
 
-## Numbered deviations from the Solidity original
+## What the language provides vs what the module shims
 
-1. **Factory deployment needs a stencil.** Core Solidity cannot reference a
-   sibling contract's initcode (the compiler nests only its own runtime
-   object), so `KodylFactory.solc` ships as a registry: `createEvent` is
-   replaced by `validateEventParameters` (identical checks and revert
-   payloads, in order) plus `registerEvent(evt)`, which re-reads the event's
-   parameters through its getters, re-validates, tracks, and emits
-   `EventCreated`. Duplicate registration reverts `EventAlreadyRegistered()`.
-   **The research spike then restored the real `createEvent`**:
-   `KodylFactoryV2.solc` takes the address of a STENCIL - a helper contract
-   whose runtime code IS KodylEvent's initcode, deployed with a 13-byte
-   returner prefix (`600d380380600d6000396000f3` ++ initcode) - and
-   `createEvent` extcodecopies it, appends the in-language
-   `abi_encode`-d 9-argument tuple (contiguity guaranteed because
-   `allocate_memory` advances the free pointer abi_encode continues from),
-   and CREATE2s a real KodylEvent, salted like the original
-   (packed sender ++ eventStart ++ timestamp ++ eventCount). Verified by a
-   full register/checkIn/claim lifecycle on a factory-deployed instance.
-   V2's constructor takes (maintainer, stencil) - one extra arg vs the
-   original.
-2. **checkInBatch via manual fallback dispatch.** The std ABI decoder for
-   dynamic arrays is a stub, so `checkInBatch(address[])` cannot be a typed
-   public function. The fallback matches the canonical selector and decodes
-   the calldata array by hand: same ordering, same skip semantics, same
-   `BatchTooLarge` payload. Malformed calldata is treated more leniently
-   than 0.8 strict decoding.
-3. **receive() emulated in the fallback.** The language has no `receive`;
-   empty calldata routes to the payable fallback, which reverts
-   `TransferFailed()` exactly like the original's receive. Unknown selectors
-   revert with empty data, as Solidity does for a contract without fallback.
-4. **Non-payable functions called with value** revert with the dispatch
-   layer's `Error(0xb5988ea3)` instead of Solidity's empty revert. Untested
-   by the oracle; latent difference.
-5. **Checked arithmetic is shimmed.** Core Solidity `+ - * / %` wrap (raw EVM
-   ops). `addCk/subCk/mulCk` reproduce `Panic(0x11)` and `solAssert`
-   reproduces `Panic(0x01)` exactly where the Solidity source was checked;
-   spots inside `unchecked` blocks in the source stay raw. `&&`/`||` do not
-   short-circuit in Core Solidity - every guard was audited to be
-   side-effect-free and division-free.
-6. **AttendeeStatus costs 4 storage slots per mapping entry** (right-nested
-   sum representation: n-1 slots for n variants). Behaviorally identical,
-   gas diverges.
-7. **Cross-contract reads use CALL via std raw_call** (`maintainer()`,
-   registerEvent's parameter reads) where solc emits STATICCALL for view
-   calls, and a failed call reverts empty rather than bubbling returndata.
-8. **Constants are functions.** No `constant` keyword and no time-unit sugar:
-   `MAX_BATCH_SIZE()`, `DUST_CLAIM_TIMEOUT()`, `MIN_CANCELLATION_BUFFER()`
-   return literals (`30 days` = 2592000).
-9. **Events are hand-rolled** over `log1..log3`; topic0 is derived in-source
-   with compile-time-folded `keccakLit("Sig(...)")`. `MetadataUpdated(string)`
-   data uses `abi_encode` + the dispatch size idiom. All emissions are
-   verified by the oracle's `expectEmit` assertions.
-10. **Reason strings are precomputed packed words.** String literals exist
-    only at compile time (`string`, not constructible as `memory(string)`),
-    so `InvalidEventParameters(string)` payloads embed the utf8 words with
-    the plain text in comments, and `VERSION()` builds "1.0.0" by hand.
+Provided by the language and leaned on hard: ADT storage with derived
+`CanStore` (including the 8-slot `EventRec` behind a mapping), exhaustive
+`match` with payload binding, nested mappings, storage arrays of strings,
+canonical Solidity selectors from dispatch, `payable` dispatch,
+compile-time-folded `keccakLit`, for-loops, and the module system.
 
-## What the port exercises that no single solcore example does
+Shimmed in `kodyl.solc` because the language does not have it yet (each maps
+to a tracked upstream gap):
 
-ADT-valued mappings + derived state machines with `match`, a 9-argument
-constructor with a trailing dynamic string, payable/non-payable dispatch,
-hand-rolled indexed events, byte-exact custom errors with arguments,
-cross-contract calls, storage arrays with DynArray returns, a shared user
-module (`export`/`import lib.`), for-loops over calldata, and Panic-faithful
-checked-arithmetic shims - all verified against a pre-existing Solidity test
-suite through real deployed bytecode.
+1. **Checked arithmetic** (`addCk`/`subCk`/`mulCk`/`solAssert` reproducing
+   `Panic(0x11)`/`0x01`) - operators wrap today (solcore #484).
+2. **Events** - no `emit`; hand-rolled `log1..log3` emitters, generic over
+   topics.
+3. **Errors with arguments** - payloads built to match
+   `abi.encodeWithSelector` byte-for-byte.
+4. **Runtime strings** - literals are compile-time only (solcore #264), so
+   `InvalidEventParameters(string)` reasons are precomputed packed words
+   with the plaintext in comments.
+5. **`receive` and dynamic-array parameters** - both live in the payable
+   fallback: empty calldata reverts (stray-ETH rejection), and
+   `checkInBatch(uint256,address[])` is decoded from calldata by hand (the
+   std array decoder is a stub).
+6. **Environment globals** - `msg.sender`/`block.timestamp` etc. are opcode
+   wrappers typed in the module.
+
+Zero `assembly` blocks anywhere: every opcode used is an imported typed
+function.
+
+## Design deviations from spec.md
+
+- **Shared custody.** spec.md's factory rationale includes per-event fund
+  isolation; the singleton pools custody and compensates with the
+  ledger invariants above. This is the one real security-posture trade of
+  the design.
+- `EventAlreadyStarted` covers every non-Registration state for
+  `cancelEvent` (including already-cancelled), instead of a dedicated error.
+- After `DUST_CLAIM_TIMEOUT`, unclaimed payouts sweep to the maintainer with
+  the dust (spec.md leaves late-claimer behavior after timeout implicit).
+- `disputePeriod` is validated to `[1 hour, 30 days]`. spec.md gives only a
+  default (24h) and no bounds; the range is deliberate defensive validation
+  (a zero window would strand late-but-present attendees, an unbounded one
+  would lock funds for years). Documented rather than removed.
+
+## Security review
+
+An adversarial review (three finder lenses - spec conformance, funds safety,
+language traps - each finding then attacked by a skeptic) surfaced three real
+issues, all fixed and regression-tested:
+
+- **Forced-ETH brick (critical).** The `balance == totalHeld` invariant used
+  strict equality; `selfdestruct` / block-reward payments can raise the
+  balance without executing code, so 1 wei would have made the assert fail
+  permanently and freeze every flow for every event. Fixed to `>=`
+  (`test_forcedETH_doesNotBrickFlows`).
+- **Check-in on a cancelled event (high).** `checkInInner` gated only on the
+  time window, so the organizer could flip a registered attendee to
+  CheckedIn after cancelling, stranding the deposit (no path back to a
+  refund). Check-in is now gated on the derived state (Active/Dispute), which
+  a cancelled event never has (`test_checkIn_rejectedAfterCancelSoRefundStaysOpen`).
+- **disputePeriod bounds (low).** Documented above.
