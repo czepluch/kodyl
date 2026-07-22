@@ -59,6 +59,29 @@ noted).
 | Per-event isolation of status/counters/pots | test_register_isolatedAcrossEvents, test_claimDust_isolatedPerEvent |
 | Organizer authority scoped per event | test_cancelEvent_organizerScopedPerEvent, test_checkIn_organizerScopedPerEvent |
 | Multi-event lifecycle with shared attendee | test_integration_twoOverlappingEvents |
-| Ledger consistency under fuzz | KodylInvariant.t.sol |
+| Ledger consistency under fuzz (registration phase) | KodylInvariant.t.sol |
 | Check-in rejected on cancelled event; refund stays open (review, high) | test_checkIn_rejectedAfterCancelSoRefundStaysOpen |
 | Forced ETH does not brick flows (review, critical) | test_forcedETH_doesNotBrickFlows |
+
+## Shared-custody accounting (the core design risk)
+
+Pooling all deposits in one balance is the singleton's central trade; these
+tests attack the accounting that has to earn back per-event isolation.
+
+| Property | Verified by |
+|---|---|
+| Reentrant claimant cannot double-claim (CEI + status transition) | KodylAccounting: test_reentrancy_doubleClaimGainsNothing |
+| Reentrant claimDust during payout extracts nothing | test_reentrancy_claimDustGainsNothing |
+| Reentrant cross-event cancel keeps all pots consistent | test_reentrancy_crossEventCancelStaysConsistent |
+| Exact per-event conservation at indivisible deposits (7 wei, 100 wei, prime splits) | test_conservation_indivisible7wei, test_conservation_primeSplit |
+| Reward = floor(noShow*deposit/checkedIn), dust = remainder, no wei created/lost | test_conservation_* (all six) |
+| Late claim after the timeout dust-sweep fails safely (no ETH conjured) | test_lateClaimAfterDustSweep_failsSafely |
+| Full-lifecycle three-way ledger equality (balance == totalHeld == sum(held)) | KodylConservation: invariant_ledgerThreeWayEquality (128k calls) |
+| Compiler-independent ETH conservation (in - out == balance) | invariant_ethConserved (128k calls) |
+| Per-event pot == its own deposits minus payouts (catches cross-event leak) | invariant_perEventConserved (128k calls) |
+
+The lifecycle invariants fuzz register / cancel / claimRefund / check-in /
+claim / dust / cancelEvent with time advancing across three concurrent events
+of different (and indivisible) deposits; all eight actions fire ~16k times per
+run, so reward payouts and dust sweeps are genuinely exercised, not just
+registration.
