@@ -1,0 +1,79 @@
+# Kodyl demo frontend
+
+A local-testnet UI for the Core Solidity `Kodyl` contract (`core/Kodyl.solc`),
+structured around the roles the contract actually has. React + viem talking to
+anvil. See `ROLES-PLAN.md` for the design rationale.
+
+## Roles, not "admin"
+
+Kodyl is permissionless - anyone who calls `createEvent` becomes the organizer
+of that event; the only protocol role is the maintainer (dust). So the UI is
+three lenses on the same data:
+
+- **Discover** (`/`) - browse open events and register.
+- **My tickets** (`/me`) - events you're registered for, grouped by what needs
+  doing.
+- **Organize** (`/organize`) - create events and manage the ones you run
+  (organizer controls appear contextually on each event page).
+- **Event page** (`/event/:id`) - full detail + the attendee roster,
+  reconstructed from event logs (the contract has no on-chain attendee list).
+
+## Identity: demo accounts or a real wallet
+
+Toggle in the top-right:
+- **Demo accounts** (default) - impersonate anvil's unlocked accounts, no wallet
+  setup. Best for talks.
+- **Connect wallet** - a real injected wallet (MetaMask) via viem's
+  `custom(window.ethereum)` transport. Point MetaMask at the anvil RPC and
+  import an anvil key to try it.
+
+## Metadata
+
+Events carry structured metadata (name, description, location) encoded into an
+on-chain `data:` URI when you create them. `metadata.ts`'s `resolveMetadata`
+also understands `http(s)` and `ipfs://`, so moving to real hosting later is a
+one-function change. Events created without structured metadata (e.g. the
+seed's `ipfs://...`) show the raw URI as their title.
+
+## Demo controls
+
+The chain-clock fast-forward and the account impersonator live in a **Demo
+controls** drawer (right edge) - dev affordances kept out of the main UX. Kodyl
+state is timestamp-derived, so fast-forwarding walks an event
+Registration -> Active -> Dispute -> Settled in seconds (anvil's
+`evm_setNextBlockTimestamp`).
+
+## Run it
+
+From the repo root, with the Foundry toolchain on PATH:
+
+```bash
+./scripts/check-core.sh core/Kodyl.solc   # compile to bytecode
+anvil                                      # local node (leave running)
+./scripts/deploy-anvil.sh                  # deploy; writes src/deployment.json
+./scripts/seed-anvil.sh                    # a couple of demo events
+cd frontend && npm install && npm run dev  # http://localhost:5173
+```
+
+## Structure
+
+| File | Role |
+|---|---|
+| `config.ts` | chain, clients, anvil dev accounts, ABI, label tables |
+| `session.ts` | identity + signing (demo / wallet), `sendTx` |
+| `useKodyl.ts` | per-event state via a viem public client, block-watched |
+| `logs.ts` | roster + activity reconstructed from event logs |
+| `metadata.ts` | `EventMeta`, `encodeMetadata`, `resolveMetadata` |
+| `router.ts` | tiny hash router |
+| `ctx.ts` | shared app context (data + tx runner) |
+| `components.tsx` | nav, identity bar, event card/actions, demo drawer |
+| `views.tsx` | Discover / Event / My tickets / Organize |
+| `App.tsx` | shell: providers, layout, route switch, activity feed |
+
+## Notes
+
+- Reads refresh on each new block (state only changes when a block is mined),
+  with JSON-RPC batching so a tick is one HTTP request.
+- The dev keys in `config.ts` are anvil's well-known ones. Local demo only.
+- `npm run dev` (esbuild) runs without a typecheck; `npm run build` (tsc) is
+  stricter and may want a couple of viem type touch-ups.
