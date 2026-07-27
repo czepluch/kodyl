@@ -10,22 +10,22 @@ against the compiled Core Solidity bytecode (`test/Kodyl.t.sol` unless noted).
 | Organizer creates event with params | test_createEvent_sequentialIdsAndStorage, test_createEvent_emits |
 | Parameter validation (deposit > 0, future start, end after start, deadline min 2h before event and in future, dispute period 1h..30d) | test_validation_reverts, test_validation_deadlineBoundary |
 | Attendees register with exact deposit | test_register_happyPath, test_register_revertsOnWrongDeposit |
-| Capacity cap (0 = unlimited) | test_register_revertsWhenFull |
+| Capacity cap (0 = unlimited) | test_register_revertsWhenFull (also: a cancellation frees the slot, then full again) |
 | Registration closes at event start | test_register_revertsAfterStart |
-| Cancel before deadline: immediate refund | test_cancel_refundsAndUpdatesLedger |
+| Cancel before deadline: immediate refund | test_cancel_refundsAndUpdatesLedger, test_cancel_atExactDeadline (deadline itself inclusive) |
 | No refund after deadline | test_cancel_revertsAfterDeadline |
 | Re-registration after cancellation | test_register_reRegisterAfterCancel |
 | Organizer cancels event before start: full refunds | test_cancelEvent_lifecycle, test_claimRefund_afterCancelEvenPastDeadline |
 | No event cancellation after start | test_cancelEvent_revertsAfterStart |
-| Check-in by organizer, single + batch (max 100), invalid entries skipped | test_checkIn_happyAndSkip, test_checkInBatch_throughTypedInterface, test_checkInBatch_revertsWhenTooLarge |
-| Check-in window: eventStart through eventEnd + disputePeriod | test_checkIn_revertsOutsideWindow, test_getState_transitionsOverTime |
-| Pull-only claims after dispute period | test_claim_paysDepositPlusReward, test_claim_revertsBeforeSettledAndWhenNotCheckedIn |
+| Check-in by organizer, single + batch (max 100), invalid entries skipped | test_checkIn_happyAndSkip, test_checkInBatch_throughTypedInterface, test_checkInBatch_revertsWhenTooLarge, test_checkInBatch_maxSizeBoundary (exactly 100), test_checkInBatch_emptyArrayIsNoOp, test_checkInBatch_duplicatesCountOnce |
+| Check-in window: eventStart through eventEnd + disputePeriod | test_checkIn_revertsOutsideWindow, test_checkIn_windowBackEdge (inclusive at exactly end + dispute, closed at +1 for both checkIn and checkInBatch), test_getState_transitionsOverTime |
+| Pull-only claims after dispute period | test_claim_paysDepositPlusReward, test_claim_revertsBeforeSettledAndWhenNotCheckedIn, test_claim_andDustRevertDuringDispute (still NotSettled at the inclusive Dispute back edge) |
 | Pro-rata no-show distribution + reward math | test_claim_paysDepositPlusReward (3 reg / 2 checked / 0.5 ETH each) |
-| Dust to maintainer after all claims or timeout | test_claimDust_remainderAfterAllClaims, test_claimDust_gatesAndTimeout |
+| Dust to maintainer after all claims or timeout | test_claimDust_remainderAfterAllClaims, test_claimDust_gatesAndTimeout, test_claimDust_revertsWhenPotEmpty (exact division leaves a zero pot: DustNotClaimable) |
 | Zero check-ins: everything to dust | test_claimDust_zeroCheckInsAllToDust |
-| Reject unexpected ETH | test_fallback_rejectsPlainTransferAndUnknownSelector |
-| Mutable metadata URI with event | test_setMetadataURI |
-| Maintainer management | test_setMaintainer |
+| Reject unexpected ETH | test_fallback_rejectsPlainTransferAndUnknownSelector, test_fallback_shortCalldataRevertsEmpty, test_nonPayable_rejectsValueWithStdError (value to a non-payable function: exactly the std dispatcher's NonPayableReceivedValue selector, raw bytes pinned) |
+| Mutable metadata URI with event | test_setMetadataURI, test_setMetadataURI_anyState (deliberately state-independent: works in Active, Settled, and on a cancelled event) |
+| Maintainer management | test_setMaintainer, test_claimDust_paysRotatedMaintainer (after rotation, dust and DustClaimed go to the new maintainer only) |
 
 ## Attendee status transitions (spec.md "Valid transitions")
 
@@ -37,30 +37,45 @@ against the compiled Core Solidity bytecode (`test/Kodyl.t.sol` unless noted).
 | Registered -> CheckedIn | test_checkIn_happyAndSkip |
 | Cancelled -> Registered | test_register_reRegisterAfterCancel |
 | CheckedIn -> Claimed | test_claim_paysDepositPlusReward |
-| Claimed terminal / invalid transitions revert | test_register_revertsWhenAlreadyRegistered, test_cancel_revertsWhenNotRegistered, test_claimRefund double-refund assert |
+| Claimed terminal / invalid transitions revert | test_register_revertsWhenAlreadyRegistered, test_cancel_revertsWhenNotRegistered, test_claim_paysDepositPlusReward (second claim), test_claimRefund_afterCancelEvenPastDeadline (double refund) |
 
 ## spec.md invariants
 
 | # | Invariant | Verified by |
 |---|---|---|
-| 1 | Deposit accounting: balance == deposits held (+ dust) | KodylInvariant.t.sol (128k calls, 3 events, per-event and global ledgers) + in-contract solAssert after every ETH movement |
-| 2 | No double claims (Claimed terminal) | test_claim_* (second claim reverts InvalidAttendeeStatus(4, 3) path), test_claimRefund double-refund |
+| 1 | Deposit accounting: balance == deposits held (+ dust) | In-contract solAssert of balance >= totalHeld after every ETH movement (>= absorbs forced ETH); the harness invariants prove the tight form balance == totalHeld + forcedETH under a fuzzed forced-ETH regime: KodylInvariant.t.sol invariant_ledgersConsistent and KodylConservation.t.sol invariant_ledgerThreeWayEquality (128k calls each, 3 events, per-event and global ledgers) |
+| 2 | No double claims (Claimed terminal) | test_claim_paysDepositPlusReward (second claim reverts InvalidAttendeeStatus(4, 3)), test_claimRefund_afterCancelEvenPastDeadline (double refund reverts InvalidAttendeeStatus(2, 1)) |
 | 3 | No post-deadline cancellation | test_cancel_revertsAfterDeadline |
-| 4 | Claims only after dispute period | test_claim_revertsBeforeSettledAndWhenNotCheckedIn |
-| 5 | Check-in window enforced | test_checkIn_revertsOutsideWindow |
+| 4 | Claims only after dispute period | test_claim_revertsBeforeSettledAndWhenNotCheckedIn, test_claim_andDustRevertDuringDispute |
+| 5 | Check-in window enforced | test_checkIn_revertsOutsideWindow, test_checkIn_windowBackEdge |
 | 6 | Event cancellation only before start | test_cancelEvent_revertsAfterStart |
 
 ## Singleton-specific properties (beyond spec.md)
 
 | Property | Verified by |
 |---|---|
-| Missing-event handling on every entry point | test_unknownEventReverts |
+| Missing-event handling on every entry point | test_unknownEventReverts (every typed ADT-backed getter and mutator, plus checkInBatch via raw call, reverts EventNotFound), test_unknownEventZeroGetters (raw-mapping stats - attendees, cancelled, registeredCount, checkedInCount, claimedCount, held - return zero for an unknown id, mirroring Solidity public-mapping semantics; the revert-vs-zero split is deliberate) |
+| Constructor rejects a zero maintainer | test_constructor_rejectsZeroMaintainer |
 | Per-event isolation of status/counters/pots | test_register_isolatedAcrossEvents, test_claimDust_isolatedPerEvent |
 | Organizer authority scoped per event | test_cancelEvent_organizerScopedPerEvent, test_checkIn_organizerScopedPerEvent |
 | Multi-event lifecycle with shared attendee | test_integration_twoOverlappingEvents |
-| Ledger consistency under fuzz (registration phase) | KodylInvariant.t.sol |
+| Ledger consistency under fuzz (registration phase + forced ETH) | KodylInvariant.t.sol |
 | Check-in rejected on cancelled event; refund stays open (review, high) | test_checkIn_rejectedAfterCancelSoRefundStaysOpen |
 | Forced ETH does not brick flows (review, critical) | test_forcedETH_doesNotBrickFlows |
+
+## checkInBatch calldata decoder (hand-rolled in the payable fallback)
+
+The std array decoder is a stub, so `checkInBatch(uint256,address[])` is
+decoded from raw calldata by hand in the fallback; these tests attack the
+decoder with adversarial byte strings.
+
+| Behavior | Verified by |
+|---|---|
+| Selector-only calldata: missing words read as zero, so eid decodes 0 and reverts EventNotFound | test_checkInBatch_selectorOnlyCalldata |
+| Offset past calldatasize: the length word reads zero, silent no-op success | test_checkInBatch_offsetPastCalldataIsNoOp |
+| All-ones offset wraps the length pointer to 3, the length word picks up selector bytes and trips the size cap: exact BatchTooLarge(len, 100) payload, not a silent no-op | test_checkInBatch_allOnesOffsetWrapsIntoBatchTooLarge |
+| Nonzero upper 96 bits in an array element revert DirtyHigherBitsForAddress, matching the std decoder on typed address paths; the clean variant of the same batch succeeds | test_checkInBatch_dirtyAddressWordReverts |
+| Nonzero callvalue rejected with empty revert data (the fallback's value guard) | test_checkInBatch_rejectsValueWithEmptyRevert |
 
 ## Shared-custody accounting (the core design risk)
 
@@ -75,12 +90,24 @@ tests attack the accounting that has to earn back per-event isolation.
 | Exact per-event conservation at indivisible deposits (7 wei, 100 wei, prime splits) | test_conservation_indivisible7wei, test_conservation_primeSplit |
 | Reward = floor(noShow*deposit/checkedIn), dust = remainder, no wei created/lost | test_conservation_* (all six) |
 | Late claim after the timeout dust-sweep reverts PayoutSwept() (clear error, no ETH conjured) | test_lateClaimAfterDustSweep_failsSafely |
-| Full-lifecycle three-way ledger equality (balance == totalHeld == sum(held)) | KodylConservation: invariant_ledgerThreeWayEquality (128k calls) |
-| Compiler-independent ETH conservation (in - out == balance) | invariant_ethConserved (128k calls) |
+| Full-lifecycle three-way ledger equality (sum(held) == totalHeld, balance == totalHeld + forced ETH) | KodylConservation: invariant_ledgerThreeWayEquality (128k calls) |
+| Compiler-independent ETH conservation (in + forced - out == balance) | invariant_ethConserved (128k calls) |
 | Per-event pot == its own deposits minus payouts (catches cross-event leak) | invariant_perEventConserved (128k calls) |
+| Every successful claim pays exactly deposit + floor(noShow * deposit / checkedIn), checked per claim against an independent ghost model | invariant_claimPayoutsExact (128k calls) |
 
-The lifecycle invariants fuzz register / cancel / claimRefund / check-in /
-claim / dust / cancelEvent with time advancing across three concurrent events
-of different (and indivisible) deposits; all eight actions fire ~16k times per
-run, so reward payouts and dust sweeps are genuinely exercised, not just
+The lifecycle handler is phase-aware: each action scans an independent ghost
+model of the protocol for an (event, actor) pair that lets the call succeed,
+falling back to a seed-derived pick so revert paths stay fuzzed; warps target
+the next lifecycle boundary of a chosen event, forceEth injects unledgered
+ETH, and every successful claim's balance delta is compared against the
+model's expected payout (asserted by invariant_claimPayoutsExact). Scale is
+pinned in foundry.toml (256 runs x 500 calls): each invariant is a 128k-call
+campaign in which every handler action is dispatched roughly 12.7k times.
+Per-action success counts are logged by afterInvariant (visible with -vv) as
+a final-run snapshot, not asserted. Exact counts are seed-dependent; the
+shape is stable: every protocol action lands single-digit-to-low-double-digit
+successes per 500-call run (warpForward and forceEth succeed on every
+attempt), and across a full campaign checkIn/claim/claimDust each succeed
+hundreds of times - versus 1-4 per campaign before the phase-aware rework -
+so reward payouts and dust sweeps are exercised within runs, not just
 registration.

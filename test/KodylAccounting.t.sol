@@ -46,8 +46,6 @@ contract ReentrantAttacker {
 }
 
 contract KodylAccountingTest is Test {
-    error PayoutSwept();
-
     uint256 internal constant START_TS = 1_700_000_000;
 
     address internal maintainer = makeAddr("maintainer");
@@ -294,7 +292,7 @@ contract KodylAccountingTest is Test {
         // A late claim now has no funds behind it and must revert with a clear
         // named error (not an opaque panic, and no ETH conjured).
         vm.prank(alice);
-        vm.expectRevert(PayoutSwept.selector);
+        vm.expectRevert(IKodyl.PayoutSwept.selector);
         k.claim(eid);
         assertEq(address(k).balance, 0);
     }

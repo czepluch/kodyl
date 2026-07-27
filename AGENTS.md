@@ -85,7 +85,8 @@ shared-custody accounting; `test/KodylInvariant.t.sol` fuzzes the ledger.
 ## Frontend
 
 `frontend/` is a React + viem demo (roles: Discover / My tickets / Organize).
-`frontend/src/kodylAbi.json` is generated from `test/KodylAbi.sol`. See
+`frontend/src/kodylAbi.json` is generated from `test/KodylAbi.sol` by
+`scripts/sync-abi.sh` (`--check` verifies it is current). See
 `frontend/README.md`.
 
 ## Networks

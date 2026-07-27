@@ -43,6 +43,18 @@ interface KodylAbi {
     error PayoutSwept();
     error InvalidEventParameters(string reason);
 
+    // ---- errors (std dispatcher / decoder, not declared in Kodyl.solc) ----
+    /// @dev Value sent to a non-payable public function. Originates in the std
+    ///      dispatcher's non-payable callvalue check; the name is chosen so its
+    ///      canonical selector keccak("NonPayableReceivedValue()") equals the
+    ///      std's 0xb5988ea3, making the revert decodable from this ABI.
+    error NonPayableReceivedValue();
+    /// @dev An address parameter word with nonzero upper 96 bits. Raised by the
+    ///      std's strict ABI decoding of address parameters on every typed
+    ///      path, and the hand-decoded checkInBatch enforces the same check.
+    ///      Selector 0x7cc04fa7.
+    error DirtyHigherBitsForAddress();
+
     // ---- write functions ----
     /// @return eventId the sequential id assigned to the new event
     function createEvent(

@@ -8,4 +8,12 @@ libs = ["lib"]
 solc = "0.8.33"
 fs_permissions = [{ access = "read", path = "./core/build" }]
 
+# The invariant suites advertise a 128k-call scale (256 runs x 500 calls per
+# invariant). These are the current foundry defaults; pin them so the scale is
+# a property of the repo, not of whichever forge version is installed.
+[invariant]
+runs = 256
+depth = 500
+fail_on_revert = false
+
 # See more config options https://github.com/foundry-rs/foundry/blob/master/crates/config/README.md#all-options

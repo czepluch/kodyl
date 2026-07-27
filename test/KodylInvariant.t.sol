@@ -7,13 +7,18 @@ import {IKodyl} from "./Kodyl.t.sol";
 
 /// @notice Fuzzes register / cancel across three concurrent events and five
 ///         actors during the registration phase, asserting the singleton's
-///         ledger invariants: the contract balance equals the global ledger,
-///         and each event's pot equals its registered count times its deposit.
+///         ledger invariants: the contract balance equals the global ledger
+///         plus any forced ETH, and each event's pot equals its registered
+///         count times its deposit.
 contract KodylHandler is Test {
     IKodyl internal k;
     uint256[] internal eids;
     uint256[] internal deposits;
     address[] internal actors;
+
+    // Forced ETH pushed past the ledger (selfdestruct / block rewards,
+    // modelled with vm.deal); the contract cannot see or reject it.
+    uint256 public ghostForced;
 
     constructor(IKodyl _k, uint256[] memory _eids, uint256[] memory _deposits, address[] memory _actors) {
         k = _k;
@@ -35,6 +40,12 @@ contract KodylHandler is Test {
         address a = actors[actorSeed % actors.length];
         vm.prank(a);
         try k.cancel(eids[i]) {} catch {}
+    }
+
+    function forceEth(uint96 seed) public {
+        uint256 amt = bound(uint256(seed), 1, 1 ether);
+        vm.deal(address(k), address(k).balance + amt);
+        ghostForced += amt;
     }
 }
 
@@ -82,6 +93,8 @@ contract KodylInvariantTest is Test {
             total += held;
         }
         assertEq(k.totalHeld(), total, "global ledger drift");
-        assertEq(address(k).balance, k.totalHeld(), "balance != ledger");
+        // Forced ETH sits outside the ledger by design (the contract asserts
+        // balance >= totalHeld, not ==), so the balance side allows exactly it.
+        assertEq(address(k).balance, k.totalHeld() + handler.ghostForced(), "balance != ledger + forced");
     }
 }

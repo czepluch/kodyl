@@ -474,7 +474,15 @@ contract Kodyl {
                 revertWith2(shr(224, keccakLit("BatchTooLarge(uint256,uint256)")), len, 100);
             }
             for (let i : word = 0; i < len; i = i + 1) {
-                checkInInner(eid, address(calldataload(lenPtr + 32 + i * 32)));
+                let w = calldataload(lenPtr + 32 + i * 32);
+                // Strict ABI decoding, matching the std decoder on the typed
+                // path (checkIn): an address word with dirty upper bits
+                // reverts instead of silently no-oping into an unset mapping
+                // key. Same error the std uses, so both paths are uniform.
+                if (shr(160, w) != 0) {
+                    require(false, Error(shr(224, keccakLit("DirtyHigherBitsForAddress()"))));
+                }
+                checkInInner(eid, address(w));
             }
         }
     }

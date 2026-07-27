@@ -768,6 +768,11 @@
   },
   {
     "type": "error",
+    "name": "DirtyHigherBitsForAddress",
+    "inputs": []
+  },
+  {
+    "type": "error",
     "name": "DustNotClaimable",
     "inputs": []
   },
@@ -833,6 +838,11 @@
         "internalType": "string"
       }
     ]
+  },
+  {
+    "type": "error",
+    "name": "NonPayableReceivedValue",
+    "inputs": []
   },
   {
     "type": "error",

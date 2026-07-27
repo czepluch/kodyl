@@ -28,9 +28,11 @@ singleton:
   function and matched on.
 - Custody is shared (one contract balance), so accounting is explicit: a
   per-event pot (`held`) plus a global ledger (`totalHeld`), with
-  `balance == totalHeld` asserted after every ETH movement. A side benefit:
-  per-event dust is exact - `claimDust` pays out the pot, not a balance
-  reading.
+  `balance >= totalHeld` asserted after every ETH movement. The direction is
+  `>=`, not `==`: forced ETH (selfdestruct / block-reward payments) can push
+  the balance above the ledger and cannot be rejected (see the Security
+  review section). A side benefit: per-event dust is exact - `claimDust`
+  pays out the pot, not a balance reading.
 
 ## Layout
 

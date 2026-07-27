@@ -3,74 +3,14 @@ pragma solidity ^0.8.33;
 
 import {Test} from "forge-std/Test.sol";
 import {CoreDeploy} from "./CoreDeploy.sol";
-
-/// @notice Solidity-side view of the Core Solidity singleton. Deliberately
-///         independent of src/ - the reference for behavior is spec.md, not
-///         the classic implementation.
-interface IKodyl {
-    function createEvent(
-        uint256 depositAmount,
-        uint256 cancellationDeadline,
-        uint256 eventStart,
-        uint256 eventEnd,
-        uint256 disputePeriod,
-        uint256 maxAttendees,
-        string calldata metadataURI
-    ) external returns (uint256);
-
-    function register(uint256 eid) external payable;
-    function cancel(uint256 eid) external;
-    function claimRefund(uint256 eid) external;
-    function claim(uint256 eid) external;
-    function checkIn(uint256 eid, address a) external;
-    function checkInBatch(uint256 eid, address[] calldata batch) external;
-    function cancelEvent(uint256 eid) external;
-    function setMetadataURI(uint256 eid, string calldata uri) external;
-    function claimDust(uint256 eid) external;
-    function setMaintainer(address m) external;
-
-    function maintainer() external view returns (address);
-    function eventCount() external view returns (uint256);
-    function totalHeld() external view returns (uint256);
-    function getEvent(uint256 eid)
-        external
-        view
-        returns (address, uint256, uint256, uint256, uint256, uint256, uint256);
-    function organizer(uint256 eid) external view returns (address);
-    function getState(uint256 eid) external view returns (uint256);
-    function attendees(uint256 eid, address a) external view returns (uint256);
-    function metadataURI(uint256 eid) external view returns (string memory);
-    function cancelled(uint256 eid) external view returns (bool);
-    function registeredCount(uint256 eid) external view returns (uint256);
-    function checkedInCount(uint256 eid) external view returns (uint256);
-    function claimedCount(uint256 eid) external view returns (uint256);
-    function held(uint256 eid) external view returns (uint256);
-    function rewardPerAttendee(uint256 eid) external view returns (uint256);
-    function MAX_BATCH_SIZE() external view returns (uint256);
-    function DUST_CLAIM_TIMEOUT() external view returns (uint256);
-    function MIN_CANCELLATION_BUFFER() external view returns (uint256);
-}
+// KodylAbi is the single hand-authored interface (functions, events, errors):
+// the same source `forge inspect` turns into the frontend ABI, so the tests
+// exercise exactly what ships. The IKodyl alias is a re-export for the sibling
+// suites that import the interface from here under its old name.
+import {KodylAbi} from "./KodylAbi.sol";
+import {KodylAbi as IKodyl} from "./KodylAbi.sol";
 
 contract KodylTest is Test {
-    // Errors of the core implementation.
-    error EventNotFound();
-    error RegistrationClosed();
-    error AlreadyRegistered();
-    error IncorrectDeposit(uint256 expected, uint256 received);
-    error EventFull();
-    error CancellationDeadlinePassed();
-    error InvalidAttendeeStatus(uint8 current, uint8 expected);
-    error CheckInWindowClosed();
-    error NotSettled();
-    error EventAlreadyStarted();
-    error BatchTooLarge(uint256 size, uint256 max);
-    error TransferFailed();
-    error EventNotCancelled();
-    error NotOrganizer();
-    error NotAuthorized();
-    error DustNotClaimable();
-    error InvalidEventParameters(string reason);
-
     event EventCreated(
         uint256 indexed eventId, address indexed organizer, uint256 depositAmount, uint256 eventStart, uint256 eventEnd
     );
@@ -105,14 +45,14 @@ contract KodylTest is Test {
     address internal bob = makeAddr("bob");
     address internal carol = makeAddr("carol");
 
-    IKodyl internal k;
+    KodylAbi internal k;
     uint256 internal eventStart;
     uint256 internal eventEnd;
     uint256 internal disputePeriod = 1 days;
 
     function setUp() public {
         vm.warp(START_TS);
-        k = IKodyl(CoreDeploy.deploy("Kodyl", abi.encode(maintainer)));
+        k = KodylAbi(CoreDeploy.deploy("Kodyl", abi.encode(maintainer)));
         eventStart = START_TS + 30 days;
         eventEnd = eventStart + 1 days;
     }
@@ -138,6 +78,17 @@ contract KodylTest is Test {
 
     function _toSettled() internal {
         vm.warp(eventEnd + disputePeriod + 1);
+    }
+
+    // ==================================================================
+    // constructor
+    // ==================================================================
+
+    function test_constructor_rejectsZeroMaintainer() public {
+        // The constructor refuses a zero maintainer; tryDeploy surfaces the
+        // revert as address(0) instead of aborting the test.
+        assertEq(CoreDeploy.tryDeploy("Kodyl", abi.encode(address(0))), address(0));
+        assertTrue(CoreDeploy.tryDeploy("Kodyl", abi.encode(maintainer)) != address(0));
     }
 
     // ==================================================================
@@ -176,21 +127,54 @@ contract KodylTest is Test {
     }
 
     function test_unknownEventReverts() public {
-        vm.expectRevert(EventNotFound.selector);
+        vm.expectRevert(KodylAbi.EventNotFound.selector);
         k.getEvent(1);
-        vm.expectRevert(EventNotFound.selector);
+        vm.expectRevert(KodylAbi.EventNotFound.selector);
         k.getState(99);
         vm.deal(alice, DEPOSIT);
         vm.prank(alice);
-        vm.expectRevert(EventNotFound.selector);
+        vm.expectRevert(KodylAbi.EventNotFound.selector);
         k.register{value: DEPOSIT}(1);
-        vm.expectRevert(EventNotFound.selector);
+        vm.expectRevert(KodylAbi.EventNotFound.selector);
         k.claim(1);
         vm.prank(organizer);
-        vm.expectRevert(EventNotFound.selector);
+        vm.expectRevert(KodylAbi.EventNotFound.selector);
         k.checkIn(1, alice);
-        vm.expectRevert(EventNotFound.selector);
+        vm.expectRevert(KodylAbi.EventNotFound.selector);
         k.claimDust(1);
+        vm.expectRevert(KodylAbi.EventNotFound.selector);
+        k.organizer(99);
+        vm.expectRevert(KodylAbi.EventNotFound.selector);
+        k.metadataURI(99);
+        vm.expectRevert(KodylAbi.EventNotFound.selector);
+        k.rewardPerAttendee(99);
+        vm.prank(alice);
+        vm.expectRevert(KodylAbi.EventNotFound.selector);
+        k.cancel(99);
+        vm.prank(alice);
+        vm.expectRevert(KodylAbi.EventNotFound.selector);
+        k.claimRefund(99);
+        vm.prank(organizer);
+        vm.expectRevert(KodylAbi.EventNotFound.selector);
+        k.cancelEvent(99);
+        vm.prank(organizer);
+        vm.expectRevert(KodylAbi.EventNotFound.selector);
+        k.setMetadataURI(99, "ipfs://nope");
+        // checkInBatch dispatches through the fallback: raw call, same error.
+        (bool ok, bytes memory ret) = address(k).call(abi.encodeCall(KodylAbi.checkInBatch, (99, new address[](0))));
+        assertFalse(ok);
+        assertEq(ret, abi.encodeWithSelector(KodylAbi.EventNotFound.selector));
+    }
+
+    function test_unknownEventZeroGetters() public view {
+        // Deliberate two-tier read surface: id-validating getters revert
+        // (above), plain counter and mapping reads just return the zero slot.
+        assertEq(k.attendees(99, alice), NONE);
+        assertEq(k.cancelled(99), false);
+        assertEq(k.registeredCount(99), 0);
+        assertEq(k.checkedInCount(99), 0);
+        assertEq(k.claimedCount(99), 0);
+        assertEq(k.held(99), 0);
     }
 
     // ==================================================================
@@ -198,7 +182,7 @@ contract KodylTest is Test {
     // ==================================================================
 
     function _expectInvalid(string memory reason) internal {
-        vm.expectRevert(abi.encodeWithSelector(InvalidEventParameters.selector, reason));
+        vm.expectRevert(abi.encodeWithSelector(KodylAbi.InvalidEventParameters.selector, reason));
     }
 
     function test_validation_reverts() public {
@@ -287,8 +271,14 @@ contract KodylTest is Test {
         uint256 eid = _create();
         vm.deal(alice, 1 ether);
         vm.prank(alice);
-        vm.expectRevert(abi.encodeWithSelector(IncorrectDeposit.selector, DEPOSIT, 0.5 ether));
+        vm.expectRevert(abi.encodeWithSelector(KodylAbi.IncorrectDeposit.selector, DEPOSIT, 0.5 ether));
         k.register{value: 0.5 ether}(eid);
+
+        // Overpay is rejected too: expected deposit first, received second.
+        vm.deal(alice, 1.5 ether);
+        vm.prank(alice);
+        vm.expectRevert(abi.encodeWithSelector(KodylAbi.IncorrectDeposit.selector, DEPOSIT, 1.5 ether));
+        k.register{value: 1.5 ether}(eid);
     }
 
     function test_register_revertsWhenAlreadyRegistered() public {
@@ -296,7 +286,7 @@ contract KodylTest is Test {
         _register(eid, alice);
         vm.deal(alice, DEPOSIT);
         vm.prank(alice);
-        vm.expectRevert(AlreadyRegistered.selector);
+        vm.expectRevert(KodylAbi.AlreadyRegistered.selector);
         k.register{value: DEPOSIT}(eid);
     }
 
@@ -305,7 +295,7 @@ contract KodylTest is Test {
         _toActive();
         vm.deal(alice, DEPOSIT);
         vm.prank(alice);
-        vm.expectRevert(RegistrationClosed.selector);
+        vm.expectRevert(KodylAbi.RegistrationClosed.selector);
         k.register{value: DEPOSIT}(eid);
     }
 
@@ -314,7 +304,18 @@ contract KodylTest is Test {
         _register(eid, alice);
         vm.deal(bob, DEPOSIT);
         vm.prank(bob);
-        vm.expectRevert(EventFull.selector);
+        vm.expectRevert(KodylAbi.EventFull.selector);
+        k.register{value: DEPOSIT}(eid);
+
+        // A cancellation frees the slot: the next registrant fits, then the
+        // event is full again for the one after.
+        vm.prank(alice);
+        k.cancel(eid);
+        _register(eid, bob);
+        assertEq(k.registeredCount(eid), 1);
+        vm.deal(carol, DEPOSIT);
+        vm.prank(carol);
+        vm.expectRevert(KodylAbi.EventFull.selector);
         k.register{value: DEPOSIT}(eid);
     }
 
@@ -327,6 +328,18 @@ contract KodylTest is Test {
         _register(eid, alice);
         assertEq(k.attendees(eid, alice), REGISTERED);
         assertEq(k.registeredCount(eid), 1);
+
+        // The re-registered attendee goes through the normal lifecycle.
+        _toActive();
+        vm.prank(organizer);
+        k.checkIn(eid, alice);
+        _toSettled();
+        uint256 balBefore = alice.balance;
+        vm.prank(alice);
+        k.claim(eid);
+        assertEq(alice.balance, balBefore + DEPOSIT); // no no-shows: deposit only
+        assertEq(k.attendees(eid, alice), CLAIMED);
+        assertEq(k.totalHeld(), 0);
     }
 
     function test_register_isolatedAcrossEvents() public {
@@ -370,14 +383,28 @@ contract KodylTest is Test {
         _register(eid, alice);
         vm.warp(eventStart - 7 days + 1);
         vm.prank(alice);
-        vm.expectRevert(CancellationDeadlinePassed.selector);
+        vm.expectRevert(KodylAbi.CancellationDeadlinePassed.selector);
         k.cancel(eid);
+    }
+
+    function test_cancel_atExactDeadline() public {
+        // The deadline itself is inclusive (only strict > reverts).
+        uint256 eid = _create();
+        _register(eid, alice);
+        vm.warp(eventStart - 7 days);
+        uint256 balBefore = alice.balance;
+        vm.prank(alice);
+        k.cancel(eid);
+        assertEq(alice.balance, balBefore + DEPOSIT);
+        assertEq(k.registeredCount(eid), 0);
+        assertEq(k.held(eid), 0);
+        assertEq(k.totalHeld(), 0);
     }
 
     function test_cancel_revertsWhenNotRegistered() public {
         uint256 eid = _create();
         vm.prank(alice);
-        vm.expectRevert(abi.encodeWithSelector(InvalidAttendeeStatus.selector, 0, 1));
+        vm.expectRevert(abi.encodeWithSelector(KodylAbi.InvalidAttendeeStatus.selector, 0, 1));
         k.cancel(eid);
     }
 
@@ -390,7 +417,7 @@ contract KodylTest is Test {
         assertEq(k.cancelled(eid), true);
 
         vm.prank(alice);
-        vm.expectRevert(NotOrganizer.selector);
+        vm.expectRevert(KodylAbi.NotOrganizer.selector);
         k.cancelEvent(eid);
     }
 
@@ -398,7 +425,7 @@ contract KodylTest is Test {
         uint256 eid = _create();
         _toActive();
         vm.prank(organizer);
-        vm.expectRevert(EventAlreadyStarted.selector);
+        vm.expectRevert(KodylAbi.EventAlreadyStarted.selector);
         k.cancelEvent(eid);
     }
 
@@ -408,7 +435,7 @@ contract KodylTest is Test {
         uint256 b = _createAs(carol, 0);
         // organizer of a cannot cancel carol's event.
         vm.prank(organizer);
-        vm.expectRevert(NotOrganizer.selector);
+        vm.expectRevert(KodylAbi.NotOrganizer.selector);
         k.cancelEvent(b);
         vm.prank(carol);
         k.cancelEvent(b);
@@ -424,7 +451,7 @@ contract KodylTest is Test {
         k.cancelEvent(eid);
 
         vm.prank(alice);
-        vm.expectRevert(CancellationDeadlinePassed.selector);
+        vm.expectRevert(KodylAbi.CancellationDeadlinePassed.selector);
         k.cancel(eid);
 
         uint256 balBefore = alice.balance;
@@ -437,7 +464,7 @@ contract KodylTest is Test {
 
         // No double refund.
         vm.prank(alice);
-        vm.expectRevert(abi.encodeWithSelector(InvalidAttendeeStatus.selector, 2, 1));
+        vm.expectRevert(abi.encodeWithSelector(KodylAbi.InvalidAttendeeStatus.selector, 2, 1));
         k.claimRefund(eid);
     }
 
@@ -445,7 +472,7 @@ contract KodylTest is Test {
         uint256 eid = _create();
         _register(eid, alice);
         vm.prank(alice);
-        vm.expectRevert(EventNotCancelled.selector);
+        vm.expectRevert(KodylAbi.EventNotCancelled.selector);
         k.claimRefund(eid);
     }
 
@@ -463,13 +490,13 @@ contract KodylTest is Test {
         // Into the would-be check-in window; check-in must now revert.
         _toActive();
         vm.prank(organizer);
-        vm.expectRevert(CheckInWindowClosed.selector);
+        vm.expectRevert(KodylAbi.CheckInWindowClosed.selector);
         k.checkIn(eid, alice);
 
         address[] memory batch = new address[](1);
         batch[0] = alice;
         vm.prank(organizer);
-        vm.expectRevert(CheckInWindowClosed.selector);
+        vm.expectRevert(KodylAbi.CheckInWindowClosed.selector);
         k.checkInBatch(eid, batch);
 
         // alice is still Registered and can reclaim her deposit.
@@ -542,7 +569,7 @@ contract KodylTest is Test {
         uint256 eid = _create();
         _register(eid, alice);
         vm.prank(organizer);
-        vm.expectRevert(CheckInWindowClosed.selector);
+        vm.expectRevert(KodylAbi.CheckInWindowClosed.selector);
         k.checkIn(eid, alice);
     }
 
@@ -553,8 +580,30 @@ contract KodylTest is Test {
         _register(b, alice);
         _toActive();
         vm.prank(organizer); // organizer of a, not b
-        vm.expectRevert(NotOrganizer.selector);
+        vm.expectRevert(KodylAbi.NotOrganizer.selector);
         k.checkIn(b, alice);
+    }
+
+    function test_checkIn_windowBackEdge() public {
+        uint256 eid = _create();
+        _register(eid, alice);
+        _register(eid, bob);
+        // Last valid instant: the dispute period end is inclusive.
+        vm.warp(eventEnd + disputePeriod);
+        vm.prank(organizer);
+        k.checkIn(eid, alice);
+        assertEq(k.attendees(eid, alice), CHECKED_IN);
+
+        // One second later the event is Settled and both paths close.
+        vm.warp(eventEnd + disputePeriod + 1);
+        vm.prank(organizer);
+        vm.expectRevert(KodylAbi.CheckInWindowClosed.selector);
+        k.checkIn(eid, bob);
+        address[] memory batch = new address[](1);
+        batch[0] = bob;
+        vm.prank(organizer);
+        vm.expectRevert(KodylAbi.CheckInWindowClosed.selector);
+        k.checkInBatch(eid, batch);
     }
 
     function test_checkInBatch_throughTypedInterface() public {
@@ -581,7 +630,7 @@ contract KodylTest is Test {
         _toActive();
         address[] memory batch = new address[](101);
         vm.prank(organizer);
-        vm.expectRevert(abi.encodeWithSelector(BatchTooLarge.selector, 101, 100));
+        vm.expectRevert(abi.encodeWithSelector(KodylAbi.BatchTooLarge.selector, 101, 100));
         k.checkInBatch(eid, batch);
     }
 
@@ -591,8 +640,131 @@ contract KodylTest is Test {
         address[] memory batch = new address[](1);
         batch[0] = alice;
         vm.prank(alice);
-        vm.expectRevert(NotOrganizer.selector);
+        vm.expectRevert(KodylAbi.NotOrganizer.selector);
         k.checkInBatch(eid, batch);
+    }
+
+    function test_checkInBatch_maxSizeBoundary() public {
+        // Exactly MAX_BATCH_SIZE registered attendees go through in one call.
+        uint256 eid = _create();
+        address[] memory batch = new address[](100);
+        for (uint256 i = 0; i < 100; i++) {
+            address a = address(uint160(0xC0FFEE00 + i));
+            batch[i] = a;
+            _register(eid, a);
+        }
+        _toActive();
+        vm.prank(organizer);
+        k.checkInBatch(eid, batch);
+        assertEq(k.checkedInCount(eid), 100);
+    }
+
+    function test_checkInBatch_emptyArrayIsNoOp() public {
+        uint256 eid = _create();
+        _register(eid, alice);
+        _toActive();
+        vm.prank(organizer);
+        k.checkInBatch(eid, new address[](0));
+        assertEq(k.checkedInCount(eid), 0);
+        assertEq(k.attendees(eid, alice), REGISTERED);
+    }
+
+    function test_checkInBatch_duplicatesCountOnce() public {
+        uint256 eid = _create();
+        _register(eid, alice);
+        _toActive();
+        address[] memory batch = new address[](2);
+        batch[0] = alice;
+        batch[1] = alice;
+        vm.prank(organizer);
+        k.checkInBatch(eid, batch);
+        assertEq(k.attendees(eid, alice), CHECKED_IN);
+        assertEq(k.checkedInCount(eid), 1); // second entry hits the CheckedIn skip
+    }
+
+    // ==================================================================
+    // checkInBatch decoder (raw calldata against the hand-rolled fallback)
+    // ==================================================================
+
+    function test_checkInBatch_selectorOnlyCalldata() public {
+        // 4-byte calldata: every missing word reads as zero, so eid decodes
+        // as 0, which is never a real event.
+        _create();
+        (bool ok, bytes memory ret) = address(k).call(abi.encodePacked(KodylAbi.checkInBatch.selector));
+        assertFalse(ok);
+        assertEq(ret, abi.encodeWithSelector(KodylAbi.EventNotFound.selector));
+    }
+
+    function test_checkInBatch_offsetPastCalldataIsNoOp() public {
+        uint256 eid = _create();
+        _register(eid, alice);
+        _toActive();
+        // Offset points past calldatasize: the length word reads as zero, so
+        // the call is a silent no-op rather than a revert.
+        bytes memory payload = abi.encodePacked(KodylAbi.checkInBatch.selector, eid, uint256(0x1000));
+        vm.prank(organizer);
+        (bool ok, bytes memory ret) = address(k).call(payload);
+        assertTrue(ok);
+        assertEq(ret.length, 0);
+        assertEq(k.checkedInCount(eid), 0);
+        assertEq(k.attendees(eid, alice), REGISTERED);
+    }
+
+    function test_checkInBatch_allOnesOffsetWrapsIntoBatchTooLarge() public {
+        uint256 eid = _create();
+        _toActive();
+        // lenPtr = 4 + (2^256 - 1) wraps to 3, so the length word is read
+        // from inside the calldata prefix: the last selector byte followed
+        // by the first 31 bytes of the eid word. That is astronomically
+        // large, so the size cap trips - not a silent no-op.
+        bytes4 sel = KodylAbi.checkInBatch.selector;
+        uint256 wrappedLen = (uint256(uint8(sel[3])) << 248) | (eid >> 8);
+        assertGt(wrappedLen, 100); // sanity: the selector byte is nonzero
+        bytes memory payload = abi.encodePacked(sel, eid, type(uint256).max);
+        vm.prank(organizer);
+        (bool ok, bytes memory ret) = address(k).call(payload);
+        assertFalse(ok);
+        assertEq(ret, abi.encodeWithSelector(KodylAbi.BatchTooLarge.selector, wrappedLen, 100));
+    }
+
+    function test_checkInBatch_dirtyAddressWordReverts() public {
+        uint256 eid = _create();
+        _register(eid, alice);
+        _toActive();
+        bytes4 sel = KodylAbi.checkInBatch.selector;
+        // Standard layout (array head at offset 0x40 past the selector), one
+        // element, with a single dirty bit above the address range. Strict
+        // decoding rejects it - same error as the std's typed address paths.
+        uint256 dirty = (uint256(1) << 160) | uint256(uint160(alice));
+        bytes memory payload = abi.encodePacked(sel, eid, uint256(0x40), uint256(1), dirty);
+        vm.prank(organizer);
+        (bool ok, bytes memory ret) = address(k).call(payload);
+        assertFalse(ok);
+        assertEq(ret, abi.encodeWithSelector(KodylAbi.DirtyHigherBitsForAddress.selector));
+        assertEq(k.attendees(eid, alice), REGISTERED);
+        assertEq(k.checkedInCount(eid), 0);
+
+        // The clean variant of the same batch goes through.
+        bytes memory clean = abi.encodePacked(sel, eid, uint256(0x40), uint256(1), uint256(uint160(alice)));
+        vm.prank(organizer);
+        (ok, ret) = address(k).call(clean);
+        assertTrue(ok);
+        assertEq(k.attendees(eid, alice), CHECKED_IN);
+        assertEq(k.checkedInCount(eid), 1);
+    }
+
+    function test_checkInBatch_rejectsValueWithEmptyRevert() public {
+        uint256 eid = _create();
+        _register(eid, alice);
+        _toActive();
+        address[] memory batch = new address[](1);
+        batch[0] = alice;
+        vm.deal(organizer, 1);
+        vm.prank(organizer);
+        (bool ok, bytes memory ret) = address(k).call{value: 1}(abi.encodeCall(KodylAbi.checkInBatch, (eid, batch)));
+        assertFalse(ok);
+        assertEq(ret.length, 0); // the fallback's value guard reverts empty
+        assertEq(k.checkedInCount(eid), 0);
     }
 
     // ==================================================================
@@ -622,6 +794,15 @@ contract KodylTest is Test {
         assertEq(k.attendees(eid, alice), CLAIMED);
         assertEq(k.claimedCount(eid), 1);
         assertEq(k.totalHeld(), 3 * DEPOSIT - (DEPOSIT + 0.5 ether));
+
+        // Claimed is terminal: a second claim names the Claimed ordinal.
+        vm.prank(alice);
+        vm.expectRevert(abi.encodeWithSelector(KodylAbi.InvalidAttendeeStatus.selector, 4, 3));
+        k.claim(eid);
+        // carol registered but never checked in: not claimable either.
+        vm.prank(carol);
+        vm.expectRevert(abi.encodeWithSelector(KodylAbi.InvalidAttendeeStatus.selector, 1, 3));
+        k.claim(eid);
     }
 
     function test_claim_revertsBeforeSettledAndWhenNotCheckedIn() public {
@@ -631,13 +812,28 @@ contract KodylTest is Test {
         vm.prank(organizer);
         k.checkIn(eid, alice);
         vm.prank(alice);
-        vm.expectRevert(NotSettled.selector);
+        vm.expectRevert(KodylAbi.NotSettled.selector);
         k.claim(eid);
 
         _toSettled();
         vm.prank(bob);
-        vm.expectRevert(abi.encodeWithSelector(InvalidAttendeeStatus.selector, 0, 3));
+        vm.expectRevert(abi.encodeWithSelector(KodylAbi.InvalidAttendeeStatus.selector, 0, 3));
         k.claim(eid);
+    }
+
+    function test_claim_andDustRevertDuringDispute() public {
+        uint256 eid = _create();
+        _register(eid, alice);
+        _toActive();
+        vm.prank(organizer);
+        k.checkIn(eid, alice);
+        // Last instant of Dispute (inclusive back edge): still not Settled.
+        vm.warp(eventEnd + disputePeriod);
+        vm.prank(alice);
+        vm.expectRevert(KodylAbi.NotSettled.selector);
+        k.claim(eid);
+        vm.expectRevert(KodylAbi.NotSettled.selector);
+        k.claimDust(eid);
     }
 
     function test_claimDust_remainderAfterAllClaims() public {
@@ -692,12 +888,18 @@ contract KodylTest is Test {
         vm.prank(organizer);
         k.checkIn(eid, alice);
 
-        vm.expectRevert(NotSettled.selector);
+        vm.expectRevert(KodylAbi.NotSettled.selector);
         k.claimDust(eid);
 
         _toSettled();
         // alice has not claimed: neither allClaimed nor timeout.
-        vm.expectRevert(DustNotClaimable.selector);
+        vm.expectRevert(KodylAbi.DustNotClaimable.selector);
+        k.claimDust(eid);
+
+        // The timeout is strict: at exactly end + dispute + 30 days the
+        // sweep is still gated.
+        vm.warp(eventEnd + disputePeriod + 30 days);
+        vm.expectRevert(KodylAbi.DustNotClaimable.selector);
         k.claimDust(eid);
 
         // After the timeout the pot (including alice's unclaimed payout)
@@ -706,6 +908,48 @@ contract KodylTest is Test {
         uint256 mBefore = maintainer.balance;
         k.claimDust(eid);
         assertEq(maintainer.balance, mBefore + 2 * DEPOSIT);
+    }
+
+    function test_claimDust_revertsWhenPotEmpty() public {
+        uint256 eid = _create();
+        _register(eid, alice);
+        _register(eid, bob);
+        _register(eid, carol);
+        _toActive();
+        vm.startPrank(organizer);
+        k.checkIn(eid, alice);
+        k.checkIn(eid, bob);
+        vm.stopPrank();
+        _toSettled();
+        // carol's forfeited 1 ETH splits evenly across 2 claimants: after
+        // both claims the pot is exactly zero.
+        vm.prank(alice);
+        k.claim(eid);
+        vm.prank(bob);
+        k.claim(eid);
+        assertEq(k.held(eid), 0);
+        // All claims are out, but there is nothing to sweep.
+        vm.expectRevert(KodylAbi.DustNotClaimable.selector);
+        k.claimDust(eid);
+    }
+
+    function test_claimDust_paysRotatedMaintainer() public {
+        uint256 eid = _create();
+        _register(eid, alice); // alice no-shows: the whole pot is dust
+        _toSettled();
+
+        address next = makeAddr("nextMaintainer");
+        vm.prank(maintainer);
+        k.setMaintainer(next);
+
+        uint256 oldBal = maintainer.balance;
+        uint256 newBal = next.balance;
+        vm.expectEmit(true, true, false, true);
+        emit DustClaimed(eid, next, DEPOSIT); // recipient is the NEW maintainer
+        k.claimDust(eid);
+        assertEq(next.balance, newBal + DEPOSIT);
+        assertEq(maintainer.balance, oldBal); // old maintainer gets nothing
+        assertEq(k.totalHeld(), 0);
     }
 
     function test_claimDust_isolatedPerEvent() public {
@@ -739,6 +983,27 @@ contract KodylTest is Test {
         assertFalse(ok, "unknown selector must revert");
     }
 
+    function test_fallback_shortCalldataRevertsEmpty() public {
+        // 2 bytes: not empty (so not the TransferFailed path), too short for
+        // a selector - rejected with empty revert data.
+        (bool ok, bytes memory ret) = address(k).call(hex"1234");
+        assertFalse(ok);
+        assertEq(ret.length, 0);
+    }
+
+    function test_nonPayable_rejectsValueWithStdError() public {
+        uint256 eid = _create();
+        _register(eid, alice);
+        vm.deal(alice, 1);
+        vm.prank(alice);
+        (bool ok, bytes memory ret) = address(k).call{value: 1}(abi.encodeCall(KodylAbi.cancel, (eid)));
+        assertFalse(ok);
+        // The std dispatcher's non-payable guard: exactly its 4-byte selector.
+        assertEq(ret, abi.encodeWithSelector(KodylAbi.NonPayableReceivedValue.selector));
+        assertEq(ret, hex"b5988ea3"); // pins the raw selector bytes too
+        assertEq(k.attendees(eid, alice), REGISTERED); // nothing changed
+    }
+
     // ==================================================================
     // maintainer + constants
     // ==================================================================
@@ -752,15 +1017,15 @@ contract KodylTest is Test {
         assertEq(k.maintainer(), next);
 
         vm.prank(alice);
-        vm.expectRevert(NotAuthorized.selector);
+        vm.expectRevert(KodylAbi.NotAuthorized.selector);
         k.setMaintainer(alice);
 
         vm.prank(next);
-        vm.expectRevert(abi.encodeWithSelector(InvalidEventParameters.selector, "Zero address"));
+        vm.expectRevert(abi.encodeWithSelector(KodylAbi.InvalidEventParameters.selector, "Zero address"));
         k.setMaintainer(address(0));
 
         vm.prank(next);
-        vm.expectRevert(abi.encodeWithSelector(InvalidEventParameters.selector, "Same maintainer"));
+        vm.expectRevert(abi.encodeWithSelector(KodylAbi.InvalidEventParameters.selector, "Same maintainer"));
         k.setMaintainer(next);
     }
 
@@ -773,8 +1038,32 @@ contract KodylTest is Test {
         assertEq(k.metadataURI(eid), "ipfs://new");
 
         vm.prank(alice);
-        vm.expectRevert(NotOrganizer.selector);
+        vm.expectRevert(KodylAbi.NotOrganizer.selector);
         k.setMetadataURI(eid, "ipfs://evil");
+    }
+
+    function test_setMetadataURI_anyState() public {
+        // Deliberately state-independent: the organizer can fix metadata at
+        // any point in the lifecycle, including after cancellation.
+        uint256 a = _create();
+        vm.warp(START_TS + 1);
+        uint256 b = _createAs(organizer, 0);
+        vm.prank(organizer);
+        k.cancelEvent(b);
+
+        _toActive();
+        vm.prank(organizer);
+        k.setMetadataURI(a, "ipfs://active");
+        assertEq(k.metadataURI(a), "ipfs://active");
+
+        vm.prank(organizer);
+        k.setMetadataURI(b, "ipfs://cancelled");
+        assertEq(k.metadataURI(b), "ipfs://cancelled");
+
+        _toSettled();
+        vm.prank(organizer);
+        k.setMetadataURI(a, "ipfs://settled");
+        assertEq(k.metadataURI(a), "ipfs://settled");
     }
 
     function test_constants() public view {
