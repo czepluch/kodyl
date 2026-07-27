@@ -35,8 +35,12 @@ Core files:
 forge test                   # forge is a HARNESS only; deploys core/build/*.hex
 ```
 
-Toolchain is pinned in `scripts/check-core.sh` to the solcore checkout that
-built the installed `sol-core`/`yule`. **Do not modify the solcore repo.** After
+The toolchain is pinned by `scripts/pin-toolchain.sh` into `toolchain/`
+(gitignored): nix-built `sol-core`/`yule` as GC-rooted links, a matching `std`
+snapshot, and the solcore rev in `toolchain/SOLCORE_REV` - binaries and std
+move together or not at all. `check-core.sh` consumes them (env-overridable)
+and stamps every build into `core/build/TOOLCHAIN`. **Do not modify the
+solcore repo.** After
 editing a `.solc` file, always `check-core.sh` then `forge test` - the tests
 assert selectors, event topics, and revert payloads byte-for-byte, so a
 hand-rolled encoding mistake surfaces immediately.
@@ -67,8 +71,11 @@ shared-custody accounting; `test/KodylInvariant.t.sol` fuzzes the ledger.
 - **No `receive`, and dynamic-array params are a decoder stub** - both handled
   in the `payable fallback` (empty calldata rejects ETH; `checkInBatch` is
   decoded from calldata by hand).
-- **String literals are compile-time only** - revert reason strings are
-  precomputed packed words with the plaintext in comments.
+- **String literals**: runtime materialization landed at the current pin
+  (`require(cond, "msg")` works), but its revert shape is raw bytes, not
+  Solidity `Error(string)`, and constructor code still cannot use literals -
+  so revert reason strings remain precomputed packed words (Solidity wire
+  shape, byte-asserted by the tests) until the planned builder migration.
 - **`match` has no guards** - condition-in-arm isn't supported; match the shape,
   then `if` inside the arm.
 - **Errors with args** are hand-built payloads matching `abi.encodeWithSelector`.

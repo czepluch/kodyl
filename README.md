@@ -40,9 +40,12 @@ how every mechanic in [`spec.md`](./spec.md) maps to a test.
 
 ## Toolchain
 
-The contract is compiled by an external pipeline, not `forge`. `sol-core` and
-`yule` are built from a pinned solcore checkout; `scripts/check-core.sh` records
-the exact paths. Foundry is present purely as a **test harness**: `forge test`
+The contract is compiled by an external pipeline, not `forge`.
+`scripts/pin-toolchain.sh` nix-builds `sol-core`/`yule` from a solcore
+checkout into `toolchain/` (GC-rooted links plus a `std` snapshot at the same
+rev, recorded in `toolchain/SOLCORE_REV`); `scripts/check-core.sh` consumes
+them and stamps each build into `core/build/TOOLCHAIN`. Foundry is present
+purely as a **test harness**: `forge test`
 compiles the `test/` Solidity, which reads `core/build/*.hex` and deploys it.
 (That is why `foundry.toml` sets `src = "test"` - there is no Solidity `src`
 tree.)

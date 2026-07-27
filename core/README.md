@@ -72,9 +72,13 @@ to a tracked upstream gap):
    topics.
 3. **Errors with arguments** - payloads built to match
    `abi.encodeWithSelector` byte-for-byte.
-4. **Runtime strings** - literals are compile-time only (solcore #264), so
-   `InvalidEventParameters(string)` reasons are precomputed packed words
-   with the plaintext in comments.
+4. **Runtime strings** - largely closed by the language: as of the current
+   pin, string literals materialize at runtime (`require(cond, "message")`
+   works). What the module still shims is the wire format - the native revert
+   is raw string bytes, not Solidity `Error(string)`, and constructor code
+   cannot materialize literals - so `InvalidEventParameters(string)` reasons
+   stay precomputed packed words (plaintext in comments) pending a builder
+   migration that moves the strings into source.
 5. **`receive` and dynamic-array parameters** - both live in the payable
    fallback: empty calldata reverts (stray-ETH rejection), and
    `checkInBatch(uint256,address[])` is decoded from calldata by hand (the

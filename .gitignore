@@ -21,3 +21,7 @@ soljson*.js
 
 # Core Solidity pipeline output
 core/build/
+
+# Pinned toolchain (machine-local nix GC roots + std snapshot;
+# recreate with scripts/pin-toolchain.sh)
+toolchain/
