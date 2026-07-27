@@ -1,13 +1,17 @@
 // Shared helpers for the Kodyl Core Solidity implementation, imported as
-// `import lib.kodyl.{*};`. Each function here is a piece of infrastructure the
-// language does not provide yet (checked math, error/event codegen, env
-// globals); the protocol itself lives in Kodyl.solc.
+// `import lib.kodyl.{*};`. Each definition here is a piece of infrastructure
+// the language does not provide yet (checked math, error selectors and revert
+// builders, event codegen, named constants, env globals); the protocol itself
+// lives in Kodyl.solc.
 import std.{*};
 import std.opcodes.{caller as caller_, callvalue as callvalue_, timestamp, selfbalance,
-                    gas, call, shr, mstore, revert as revert_,
+                    gas, call, shr, mload, mstore, revert as revert_,
                     log1 as log1_, log2 as log2_, log3 as log3_};
 
 export {
+    ErrSel,
+    fail,
+    requireK,
     caller,
     caller_value,
     timeNow,
@@ -18,8 +22,8 @@ export {
     subCk,
     mulCk,
     revertWith2,
+    revertStr,
     revertStr1,
-    revertStr2,
     sendValue,
     emitLog1,
     emitLog2,
@@ -27,8 +31,62 @@ export {
     emitLog3W1,
     emitLog3W3,
     emitLog2Str,
-    validateEventParams
+    validateEventParams,
+    maxBatchSize,
+    dustClaimTimeout,
+    minCancellationBuffer,
+    disputePeriodMin,
+    disputePeriodMax
 };
+
+// --- protocol constants ---
+// No constant keyword in the language yet, so nullary functions are the single
+// source of truth; every consumer calls these instead of repeating literals.
+
+// Hard cap on a checkInBatch array length.
+function maxBatchSize() -> uint256 { return 100; }
+
+// 30 days after the dispute window: unclaimed payouts sweep to the maintainer.
+function dustClaimTimeout() -> uint256 { return 2592000; }
+
+// 2 hours: minimum gap between the cancellation deadline and event start.
+function minCancellationBuffer() -> uint256 { return 7200; }
+
+// 1 hour: shortest allowed dispute period.
+function disputePeriodMin() -> uint256 { return 3600; }
+
+// 30 days: longest allowed dispute period. Equal to dustClaimTimeout by
+// coincidence only - the two must stay separate.
+function disputePeriodMax() -> uint256 { return 2592000; }
+
+// --- error selectors ---
+// An error signature literal at an ErrSel-typed position folds to its
+// right-aligned 4-byte selector at compile time (per-literal clone-and-erase
+// of fromString), so error sites read fail("X()") with no hash constants in
+// source.
+
+data ErrSel = ErrSel(word);
+
+instance ErrSel : Str {
+    function fromString(s : string) -> ErrSel {
+        return ErrSel(shr(224, keccakLit(s)));
+    }
+}
+
+// Unconditional zero-arg custom-error revert.
+function fail(e : ErrSel) -> () {
+    match e {
+    | ErrSel(w) => require(false, Error(w));
+    }
+}
+
+// require with a zero-arg custom error. No short-circuit in the language, so
+// callers must not fold compound guards into cond casually.
+function requireK(cond : bool, e : ErrSel) -> () {
+    match e {
+    | ErrSel(w) => require(cond, Error(w));
+    }
+}
 
 // --- environment ---
 
@@ -76,7 +134,7 @@ function subCk(x : uint256, y : uint256) -> uint256 {
 }
 
 function mulCk(x : uint256, y : uint256) -> uint256 {
-    if (x == uint256(0)) { return uint256(0); }
+    if (x == 0) { return 0; }
     let r = x * y;
     if (r / x != y) { panic(0x11); }
     return r;
@@ -84,23 +142,48 @@ function mulCk(x : uint256, y : uint256) -> uint256 {
 
 // --- revert payload builders ---
 // Errors WITH arguments need hand-built payloads matching abi.encodeWithSelector:
-// right-aligned 4-byte selector followed by 32-byte words. Selectors are derived
-// in place at call sites via shr(224, keccakLit("Sig(...)")), which folds at
-// compile time for literal arguments.
+// right-aligned 4-byte selector followed by 32-byte words. Call sites pass the
+// error signature literal, which folds to the selector through ErrSel : Str.
 
-function revertWith2(sel : word, a : word, b : word) -> () {
-    let p = get_free_memory();
-    mstore(p, sel);      // selector occupies bytes p+28..p+31
-    mstore(p + 32, a);
-    mstore(p + 64, b);
-    revert_(p + 28, 68);
+function revertWith2(e : ErrSel, a : word, b : word) -> () {
+    match e {
+    | ErrSel(sel) =>
+        let p = get_free_memory();
+        mstore(p, sel);      // selector occupies bytes p+28..p+31
+        mstore(p + 32, a);
+        mstore(p + 64, b);
+        revert_(p + 28, 68);
+    }
 }
 
-// Error(string)-shaped revert: selector ++ abi.encode(string) for a reason that
-// packs into one 32-byte word. The packed word and length are precomputed
-// constants; runtime string literals exist at the current pin, but their native
-// revert shape is raw bytes (not Solidity Error(string)), so the packed words
-// stay until a builder migration moves the strings into source.
+// Error(string)-shaped revert from a source literal: sel ++ abi.encode(string)
+// = selector (4 bytes, right-aligned) ++ 0x20 ++ len ++ padded data. Native
+// require(cond, "msg") reverts with RAW message bytes, so the Solidity wire
+// shape is still built by hand; only the reason string now lives in source.
+// The literal materializer zero-pads its final word, so whole-word copies are
+// byte-exact. Terminal code (revert follows), so free memory is not advanced.
+function revertStr(e : ErrSel, msg : memory(string)) -> () {
+    match e {
+    | ErrSel(sel) =>
+        let p = get_free_memory();
+        mstore(p, sel);
+        mstore(p + 32, 32);  // offset of the string head
+        let sptr = Typedef.rep(msg);
+        let len = mload(sptr);
+        mstore(p + 64, len);
+        let padded = shr(5, len + 31) * 32;
+        for (let i : word = 0; i < padded; i = i + 32) {
+            mstore(p + 96 + i, mload(sptr + 32 + i));
+        }
+        revert_(p + 28, 68 + padded);
+    }
+}
+
+// One-word packed variant kept for EXACTLY ONE site: the constructor's zero
+// address guard. String literals do not materialize in deploy code (the
+// allocators are emitted into the runtime object only; solcore
+// doc/comptime-string.md gap table), so the constructor cannot go through
+// revertStr - this packed word is the deliberate exhibit of that gap.
 function revertStr1(sel : word, len : word, w0 : word) -> () {
     let p = get_free_memory();
     mstore(p, sel);
@@ -110,22 +193,10 @@ function revertStr1(sel : word, len : word, w0 : word) -> () {
     revert_(p + 28, 100);
 }
 
-// Same, for reasons spanning two words.
-function revertStr2(sel : word, len : word, w0 : word, w1 : word) -> () {
-    let p = get_free_memory();
-    mstore(p, sel);
-    mstore(p + 32, 32);
-    mstore(p + 64, len);
-    mstore(p + 96, w0);
-    mstore(p + 128, w1);
-    revert_(p + 28, 132);
-}
-
 // --- event parameter validation ---
-// Shared by KodylFactory (registry) and the createEvent spike. Guard order and
-// InvalidEventParameters(string) payloads are byte-identical to the Solidity
-// _validateEventParameters; reason strings are precomputed packed words
-// (deviation 10), plain text in the comments.
+// Guard order and InvalidEventParameters(string) payloads are pinned
+// byte-for-byte by the forge suite; reason strings are source literals fed
+// through revertStr.
 
 function validateEventParams(
     depositAmount : uint256,
@@ -134,38 +205,28 @@ function validateEventParams(
     eventEnd : uint256,
     disputePeriod : uint256
 ) -> () {
-    let sel = shr(224, keccakLit("InvalidEventParameters(string)"));
-    if (depositAmount == uint256(0)) {
-        // "Deposit must be > 0"
-        revertStr1(sel, 19, 0x4465706f736974206d757374206265203e203000000000000000000000000000);
+    if (depositAmount == 0) {
+        revertStr("InvalidEventParameters(string)", "Deposit must be > 0");
     }
     if (eventStart <= timeNow()) {
-        // "Event must start in future"
-        revertStr1(sel, 26, 0x4576656e74206d75737420737461727420696e20667574757265000000000000);
+        revertStr("InvalidEventParameters(string)", "Event must start in future");
     }
     if (eventEnd <= eventStart) {
-        // "Event end must be after start"
-        revertStr1(sel, 29, 0x4576656e7420656e64206d757374206265206166746572207374617274000000);
+        revertStr("InvalidEventParameters(string)", "Event end must be after start");
     }
     // Written as an addition (not eventStart - buffer) so it cannot underflow
     // for near-term events; addCk keeps 0.8 checked semantics.
-    if (addCk(cancellationDeadline, uint256(7200)) > eventStart) {
-        // "Cancellation deadline too late"
-        revertStr1(sel, 30, 0x43616e63656c6c6174696f6e20646561646c696e6520746f6f206c6174650000);
+    if (addCk(cancellationDeadline, minCancellationBuffer()) > eventStart) {
+        revertStr("InvalidEventParameters(string)", "Cancellation deadline too late");
     }
     if (cancellationDeadline <= timeNow()) {
-        // "Cancellation deadline must be in future"
-        revertStr2(sel, 39,
-                   0x43616e63656c6c6174696f6e20646561646c696e65206d75737420626520696e,
-                   0x2066757475726500000000000000000000000000000000000000000000000000);
+        revertStr("InvalidEventParameters(string)", "Cancellation deadline must be in future");
     }
-    if (disputePeriod < uint256(3600)) {
-        // "Dispute period too short"
-        revertStr1(sel, 24, 0x4469737075746520706572696f6420746f6f2073686f72740000000000000000);
+    if (disputePeriod < disputePeriodMin()) {
+        revertStr("InvalidEventParameters(string)", "Dispute period too short");
     }
-    if (disputePeriod > uint256(2592000)) {
-        // "Dispute period too long"
-        revertStr1(sel, 23, 0x4469737075746520706572696f6420746f6f206c6f6e67000000000000000000);
+    if (disputePeriod > disputePeriodMax()) {
+        revertStr("InvalidEventParameters(string)", "Dispute period too long");
     }
 }
 
@@ -173,7 +234,7 @@ function validateEventParams(
 
 function sendValue(dst : address, wad : uint256) -> () {
     let ret = call(gas(), Typedef.rep(dst), Typedef.rep(wad), 0, 0, 0, 0);
-    require(ret != 0, Error(shr(224, keccakLit("TransferFailed()"))));
+    requireK(ret != 0, "TransferFailed()");
 }
 
 // --- event emission (no emit sugar in the language) ---

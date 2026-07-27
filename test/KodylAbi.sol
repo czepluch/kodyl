@@ -78,6 +78,12 @@ interface KodylAbi {
     function claimDust(uint256 eid) external;
     function setMaintainer(address newMaintainer) external;
 
+    // ---- fallback ----
+    /// @dev The contract dispatches checkInBatch and stray-ETH rejection
+    ///      through the fallback; checkInBatch is separately modeled above as
+    ///      a typed function for encoding convenience.
+    fallback() external payable;
+
     // ---- read functions ----
     function maintainer() external view returns (address);
     function eventCount() external view returns (uint256);

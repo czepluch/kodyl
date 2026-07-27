@@ -59,7 +59,7 @@ contract KodylInvariantTest is Test {
 
     function setUp() public {
         vm.warp(START_TS);
-        k = IKodyl(CoreDeploy.deploy("Kodyl", abi.encode(makeAddr("maintainer"))));
+        k = IKodyl(payable(CoreDeploy.deploy("Kodyl", abi.encode(makeAddr("maintainer")))));
 
         uint256 eventStart = START_TS + 30 days;
         // Three events with different deposits so cross-event ledger mixing

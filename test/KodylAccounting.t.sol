@@ -58,7 +58,7 @@ contract KodylAccountingTest is Test {
 
     function setUp() public {
         vm.warp(START_TS);
-        k = IKodyl(CoreDeploy.deploy("Kodyl", abi.encode(maintainer)));
+        k = IKodyl(payable(CoreDeploy.deploy("Kodyl", abi.encode(maintainer))));
         eventStart = START_TS + 30 days;
         eventEnd = eventStart + 1 days;
     }

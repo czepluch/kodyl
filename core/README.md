@@ -24,6 +24,15 @@ singleton:
   checks do in Solidity.
 - Attendee status is the same idea one level down:
   `mapping(uint256, mapping(address, AttendeeStatus))` with `None` first.
+- Per-event tallies are the product-type dual of the same idea: one positional
+  value, `data Counters = Counters(uint256, uint256, uint256, uint256)`
+  (registered, checkedIn, claimed, held), behind the event id - a
+  single-constructor product lays out with no tag word, so an unset id reads
+  back as `Counters(0, 0, 0, 0)`, the zero-slot rule shared with
+  `NoEvent`/`None`. The whole-record read-modify-write has a measured gas
+  cost (+4-6k on single-mutation tests, e.g. +5036 on the register happy
+  path; only +167 on the 100-attendee batch, whose counters write happens
+  once per call) - a trade taken deliberately for one value per event.
 - Lifecycle state is never stored; it is derived from timestamps by a pure
   function and matched on.
 - Custody is shared (one contract balance), so accounting is explicit: a
@@ -38,7 +47,7 @@ singleton:
 
 | File | Role |
 |---|---|
-| `Kodyl.solc` | The whole protocol: one contract, ~29 entry points |
+| `Kodyl.solc` | The whole protocol: one contract, 28 entry points (27 typed public functions plus `checkInBatch` through the payable fallback) |
 | `kodyl.solc` | Shared module (`import lib.kodyl.{*}`): infrastructure the language does not provide yet - checked-math shims, revert/event builders, env wrappers, validation |
 | `Probe.solc` | Toolchain canary: minimal contract proving the pipeline end to end |
 | `build/` | Pipeline output (gitignored) |
@@ -51,19 +60,26 @@ Build and test:
 forge test                       # forge is a harness only (see foundry.toml)
 ```
 
-`test/Kodyl.t.sol` (41 scenarios) and `test/KodylInvariant.t.sol` (128k-call
+`test/Kodyl.t.sol` (59 scenarios) and `test/KodylInvariant.t.sol` (128k-call
 ledger fuzz across three concurrent events), plus `test/KodylAccounting.t.sol`
 and `test/KodylConservation.t.sol` (reentrancy + full-lifecycle conservation),
 drive the compiled bytecode through a typed Solidity interface inside forge -
 selectors, event topics, and revert payloads are asserted byte-for-byte.
+`test/CoreProbe.t.sol` adds 5 canary tests pinning the language behaviors the
+design leans on (raw-bytes `require` reverts, `Str`-instance selector folding,
+UFCS storage arrays, bare literals).
 
 ## What the language provides vs what the module shims
 
 Provided by the language and leaned on hard: ADT storage with derived
-`CanStore` (including the 8-slot `EventRec` behind a mapping), exhaustive
-`match` with payload binding, nested mappings, storage arrays of strings,
-canonical Solidity selectors from dispatch, `payable` dispatch,
-compile-time-folded `keccakLit`, for-loops, and the module system.
+`CanStore` (including the 8-slot `EventRec` behind a mapping and the tagless
+`Counters` product), exhaustive `match` with payload binding, nested mappings,
+storage arrays of strings with UFCS methods (`uris.push(u)`, `uris.length()`,
+indexing), user-defined `Str` instances (a string literal at a typed position
+folds through `fromString` at compile time - the `ErrSel` selector mechanism),
+bare integer literals at `uint256` sites, canonical Solidity selectors from
+dispatch, `payable` dispatch, compile-time-folded `keccakLit`, for-loops, and
+the module system.
 
 Shimmed in `kodyl.solc` because the language does not have it yet (each maps
 to a tracked upstream gap):
@@ -72,15 +88,21 @@ to a tracked upstream gap):
    `Panic(0x11)`/`0x01`) - operators wrap today (solcore #484).
 2. **Events** - no `emit`; hand-rolled `log1..log3` emitters, generic over
    topics.
-3. **Errors with arguments** - payloads built to match
-   `abi.encodeWithSelector` byte-for-byte.
-4. **Runtime strings** - largely closed by the language: as of the current
-   pin, string literals materialize at runtime (`require(cond, "message")`
-   works). What the module still shims is the wire format - the native revert
-   is raw string bytes, not Solidity `Error(string)`, and constructor code
-   cannot materialize literals - so `InvalidEventParameters(string)` reasons
-   stay precomputed packed words (plaintext in comments) pending a builder
-   migration that moves the strings into source.
+3. **Errors** - no custom-error syntax. An `ErrSel` type with a `Str`
+   instance folds error-signature literals to their 4-byte selectors at
+   compile time, so zero-arg sites read `fail("X()")` /
+   `requireK(cond, "X()")`; errors with arguments still get hand-built
+   payloads matching `abi.encodeWithSelector` byte-for-byte (`revertWith2`,
+   `revertStr`), fed the same signature literals.
+4. **The `Error(string)` wire shape** - string literals materialize at
+   runtime, and every `InvalidEventParameters(string)` reason is now a source
+   literal fed through `revertStr`. What stays shimmed is the wire format:
+   native `require(cond, "message")` reverts the raw UTF-8 bytes, not
+   Solidity `Error(string)` (pinned by
+   `test_probe_requireMessage_revertsRawBytes`), so `revertStr` builds the
+   ABI encoding by hand - and the constructor keeps one precomputed packed
+   word ("Zero address"), because string literals do not materialize in
+   deploy code.
 5. **`receive` and dynamic-array parameters** - both live in the payable
    fallback: empty calldata reverts (stray-ETH rejection), and
    `checkInBatch(uint256,address[])` is decoded from calldata by hand (the

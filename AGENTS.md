@@ -15,8 +15,10 @@ A **singleton**: one `Kodyl` contract holds every event. An event is a
 payload-carrying ADT (`data EventRec = NoEvent | Ev(...)`) stored in a mapping
 keyed by a sequential id; `createEvent` is a state write, not a deployment.
 Attendee status is a nested mapping; lifecycle state is derived from timestamps
-and matched on. Custody is shared: one contract balance, tracked by a per-event
-pot (`heldM`) and a global ledger (`totalHeld`).
+and matched on. Per-event tallies live in one positional product value
+(`data Counters = Counters(...)`: registered, checkedIn, claimed, held) behind
+the event id. Custody is shared: one contract balance, tracked by a per-event
+pot (the `held` field of `Counters`) and a global ledger (`totalHeld`).
 
 Core files:
 - `core/Kodyl.solc` - the contract.
@@ -71,14 +73,20 @@ shared-custody accounting; `test/KodylInvariant.t.sol` fuzzes the ledger.
 - **No `receive`, and dynamic-array params are a decoder stub** - both handled
   in the `payable fallback` (empty calldata rejects ETH; `checkInBatch` is
   decoded from calldata by hand).
-- **String literals**: runtime materialization landed at the current pin
-  (`require(cond, "msg")` works), but its revert shape is raw bytes, not
-  Solidity `Error(string)`, and constructor code still cannot use literals -
-  so revert reason strings remain precomputed packed words (Solidity wire
-  shape, byte-asserted by the tests) until the planned builder migration.
+- **String literals** materialize at runtime, but the native `require(cond,
+  "msg")` revert is raw bytes, not Solidity `Error(string)` - so reason
+  strings live in source and go through `revertStr`, which builds the
+  Solidity wire shape by hand. The constructor keeps one precomputed packed
+  word (literals do not materialize in deploy code).
 - **`match` has no guards** - condition-in-arm isn't supported; match the shape,
   then `if` inside the arm.
-- **Errors with args** are hand-built payloads matching `abi.encodeWithSelector`.
+- **Errors**: sites read `fail("X()")` / `requireK(cond, "X()")` - the
+  `ErrSel` `Str` instance folds signature literals to selectors at compile
+  time; errors with args are hand-built payloads matching
+  `abi.encodeWithSelector` (`revertWith2`, `revertStr`).
+- **No named constants** - protocol constants are nullary functions in
+  `lib.kodyl` (`maxBatchSize()` etc.), the single source for internal guards
+  and the public getters alike.
 - Zero `assembly` blocks in our code - every opcode is an imported typed
   function.
 

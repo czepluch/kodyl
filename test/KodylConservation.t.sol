@@ -452,7 +452,7 @@ contract KodylConservationInvariant is Test {
 
     function setUp() public {
         vm.warp(START_TS);
-        k = IKodyl(CoreDeploy.deploy("Kodyl", abi.encode(maintainer)));
+        k = IKodyl(payable(CoreDeploy.deploy("Kodyl", abi.encode(maintainer))));
 
         deposits = new uint256[](3);
         deposits[0] = 1 ether;

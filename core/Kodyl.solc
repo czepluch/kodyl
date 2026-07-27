@@ -40,25 +40,33 @@ data AttendeeStatus = None | Registered | Cancelled | CheckedIn | Claimed;
 data EventRec = NoEvent
              | Ev(address, uint256, uint256, uint256, uint256, uint256, uint256);
 
+// Per-event tallies as one product value behind the event id. Fields, in
+// order: registered, checkedIn, claimed, held (constructor payloads are
+// positional; the language has no named fields). A single-constructor
+// product lays out as consecutive slots with NO tag word, so an unset id
+// reads back as Counters(0, 0, 0, 0) from the all-zero slots - the same
+// zero-slot design rule as NoEvent/None.
+data Counters = Counters(uint256, uint256, uint256, uint256);
+
 // --- ordinals (ADTs stay Solidity-compatible at the ABI boundary) ---
 
 function stateOrd(s : State) -> uint256 {
     match s {
-    | State.Registration => return uint256(0);
-    | State.Active       => return uint256(1);
-    | State.Dispute      => return uint256(2);
-    | State.Settled      => return uint256(3);
-    | State.Cancelled    => return uint256(4);
+    | State.Registration => return 0;
+    | State.Active       => return 1;
+    | State.Dispute      => return 2;
+    | State.Settled      => return 3;
+    | State.Cancelled    => return 4;
     }
 }
 
 function statusOrd(s : AttendeeStatus) -> uint256 {
     match s {
-    | AttendeeStatus.None       => return uint256(0);
-    | AttendeeStatus.Registered => return uint256(1);
-    | AttendeeStatus.Cancelled  => return uint256(2);
-    | AttendeeStatus.CheckedIn  => return uint256(3);
-    | AttendeeStatus.Claimed    => return uint256(4);
+    | AttendeeStatus.None       => return 0;
+    | AttendeeStatus.Registered => return 1;
+    | AttendeeStatus.Cancelled  => return 2;
+    | AttendeeStatus.CheckedIn  => return 3;
+    | AttendeeStatus.Claimed    => return 4;
     }
 }
 
@@ -74,7 +82,7 @@ function deriveState(isCancelled : bool, eventStart : uint256, eventEnd : uint25
 }
 
 function revertNotFound() -> () {
-    require(false, Error(shr(224, keccakLit("EventNotFound()"))));
+    fail("EventNotFound()");
 }
 
 // Check-ins are valid only in Active or Dispute. Gating on the derived state
@@ -84,8 +92,8 @@ function revertNotFound() -> () {
 function requireCheckInOpen(isCancelled : bool, start : uint256, end_ : uint256,
                             dispute : uint256) -> () {
     let s = stateOrd(deriveState(isCancelled, start, end_, dispute));
-    if (s != uint256(1) && s != uint256(2)) {
-        require(false, Error(shr(224, keccakLit("CheckInWindowClosed()"))));
+    if (s != 1 && s != 2) {
+        fail("CheckInWindowClosed()");
     }
 }
 
@@ -97,25 +105,23 @@ function registerGuard(st : AttendeeStatus) -> () {
     | AttendeeStatus.None      => return ();
     | AttendeeStatus.Cancelled => return ();
     | AttendeeStatus.Registered =>
-        require(false, Error(shr(224, keccakLit("AlreadyRegistered()"))));
+        fail("AlreadyRegistered()");
     | AttendeeStatus.CheckedIn =>
-        revertWith2(shr(224, keccakLit("InvalidAttendeeStatus(uint8,uint8)")), 3, 0);
+        revertWith2("InvalidAttendeeStatus(uint8,uint8)", 3, 0);
     | AttendeeStatus.Claimed =>
-        revertWith2(shr(224, keccakLit("InvalidAttendeeStatus(uint8,uint8)")), 4, 0);
+        revertWith2("InvalidAttendeeStatus(uint8,uint8)", 4, 0);
     }
 }
 
 function requireStatus(st : AttendeeStatus, expected : word) -> () {
     let cur = Typedef.rep(statusOrd(st));
     if (cur != expected) {
-        revertWith2(shr(224, keccakLit("InvalidAttendeeStatus(uint8,uint8)")), cur, expected);
+        revertWith2("InvalidAttendeeStatus(uint8,uint8)", cur, expected);
     }
 }
 
 function onlyOrganizerOf(org : address) -> () {
-    if (caller() != org) {
-        require(false, Error(shr(224, keccakLit("NotOrganizer()"))));
-    }
+    requireK(caller() == org, "NotOrganizer()");
 }
 
 contract Kodyl {
@@ -133,14 +139,16 @@ contract Kodyl {
     metadataUris : array(string);
     cancelledM : mapping(uint256, bool);
     statusM : mapping(uint256, mapping(address, AttendeeStatus));
-    regCountM : mapping(uint256, uint256);
-    chkCountM : mapping(uint256, uint256);
-    clmCountM : mapping(uint256, uint256);
-    // Per-event pot: deposits in, refunds/payouts/dust out. Makes dust exact
-    // per event instead of relying on the (shared) contract balance.
-    heldM : mapping(uint256, uint256);
+    // Per-event tallies (Counters above). The held field is the per-event
+    // pot: deposits in, refunds/payouts/dust out. Makes dust exact per event
+    // instead of relying on the (shared) contract balance.
+    countersM : mapping(uint256, Counters);
 
     constructor(maintainer_ : address) {
+        // The ONE surviving packed-word reason ("Zero address"): string
+        // literals do not materialize in deploy code (allocators live in the
+        // runtime object only; solcore doc/comptime-string.md gap table), so
+        // the constructor cannot route through revertStr.
         if (Typedef.rep(maintainer_) == 0) {
             revertStr1(shr(224, keccakLit("InvalidEventParameters(string)")), 12,
                        0x5a65726f20616464726573730000000000000000000000000000000000000000);
@@ -161,11 +169,11 @@ contract Kodyl {
     ) -> uint256 {
         validateEventParams(depositAmount, cancellationDeadline, eventStart, eventEnd, disputePeriod);
 
-        let eid = eventCount + uint256(1);
+        let eid = eventCount + 1;
         eventCount = eid;
         eventsRec[eid] = EventRec.Ev(caller(), depositAmount, cancellationDeadline,
                                      eventStart, eventEnd, disputePeriod, maxAttendees);
-        ArrayPush.push(metadataUris, metadataURI_);
+        metadataUris.push(metadataURI_);
 
         emitLog3W3(keccakLit("EventCreated(uint256,address,uint256,uint256,uint256)"),
                    Typedef.rep(eid), Typedef.rep(caller()),
@@ -186,7 +194,7 @@ contract Kodyl {
         match eventsRec[eid] {
         | EventRec.NoEvent =>
             revertNotFound();
-            return (address(0), uint256(0), uint256(0), uint256(0), uint256(0), uint256(0), uint256(0));
+            return (address(0), 0, 0, 0, 0, 0, 0);
         | EventRec.Ev(org, dep, deadline, start, end_, dispute, cap) =>
             return (org, dep, deadline, start, end_, dispute, cap);
         }
@@ -201,7 +209,7 @@ contract Kodyl {
 
     public function getState(eid : uint256) -> uint256 {
         match eventsRec[eid] {
-        | EventRec.NoEvent => revertNotFound(); return uint256(0);
+        | EventRec.NoEvent => revertNotFound(); return 0;
         | EventRec.Ev(org, dep, deadline, start, end_, dispute, cap) =>
             return stateOrd(deriveState(cancelledM[eid], start, end_, dispute));
         }
@@ -213,38 +221,55 @@ contract Kodyl {
 
     public function metadataURI(eid : uint256) -> memory(string) {
         match eventsRec[eid] {
+        // Index literals stay cast: array indexing is generic over the index
+        // type, so a bare 0 leaves it ambiguous.
         | EventRec.NoEvent => revertNotFound(); return metadataUris[uint256(0)];
         | EventRec.Ev(org, dep, deadline, start, end_, dispute, cap) =>
-            return metadataUris[eid - uint256(1)];
+            return metadataUris[eid - 1];
         }
     }
 
     public function cancelled(eid : uint256) -> bool { return cancelledM[eid]; }
-    public function registeredCount(eid : uint256) -> uint256 { return regCountM[eid]; }
-    public function checkedInCount(eid : uint256) -> uint256 { return chkCountM[eid]; }
-    public function claimedCount(eid : uint256) -> uint256 { return clmCountM[eid]; }
-    public function held(eid : uint256) -> uint256 { return heldM[eid]; }
+
+    // Counter getters keep their per-field signatures; each projects one
+    // field out of the product (unknown id: the zero record, so 0).
+    public function registeredCount(eid : uint256) -> uint256 {
+        match countersM[eid] { | Counters(reg, chk, clm, hld) => return reg; }
+    }
+    public function checkedInCount(eid : uint256) -> uint256 {
+        match countersM[eid] { | Counters(reg, chk, clm, hld) => return chk; }
+    }
+    public function claimedCount(eid : uint256) -> uint256 {
+        match countersM[eid] { | Counters(reg, chk, clm, hld) => return clm; }
+    }
+    public function held(eid : uint256) -> uint256 {
+        match countersM[eid] { | Counters(reg, chk, clm, hld) => return hld; }
+    }
 
     public function rewardPerAttendee(eid : uint256) -> uint256 {
         match eventsRec[eid] {
-        | EventRec.NoEvent => revertNotFound(); return uint256(0);
+        | EventRec.NoEvent => revertNotFound(); return 0;
         | EventRec.Ev(org, dep, deadline, start, end_, dispute, cap) =>
-            return calcReward(eid, dep);
+            match countersM[eid] {
+            | Counters(reg, chk, clm, hld) => return calcReward(reg, chk, dep);
+            }
         }
     }
 
     // Pro-rata share of forfeited no-show deposits per checked-in attendee.
-    function calcReward(eid : uint256, dep : uint256) -> uint256 {
-        let chk = chkCountM[eid];
-        if (chk == uint256(0)) { return uint256(0); }
-        let noShow = subCk(regCountM[eid], chk);
+    // Takes the tallies as arguments: callers already hold a Counters binding
+    // and must not re-read the mapping.
+    function calcReward(reg : uint256, chk : uint256, dep : uint256) -> uint256 {
+        if (chk == 0) { return 0; }
+        let noShow = subCk(reg, chk);
         return mulCk(noShow, dep) / chk;
     }
 
-    // Constants as functions: no constant keyword or time-unit sugar yet.
-    public function MAX_BATCH_SIZE() -> uint256 { return uint256(100); }
-    public function DUST_CLAIM_TIMEOUT() -> uint256 { return uint256(2592000); } // 30 days
-    public function MIN_CANCELLATION_BUFFER() -> uint256 { return uint256(7200); } // 2 hours
+    // Public constant getters: forward to the lib.kodyl nullary functions,
+    // the single source every internal guard reads too.
+    public function MAX_BATCH_SIZE() -> uint256 { return maxBatchSize(); }
+    public function DUST_CLAIM_TIMEOUT() -> uint256 { return dustClaimTimeout(); }
+    public function MIN_CANCELLATION_BUFFER() -> uint256 { return minCancellationBuffer(); }
 
     // --- attendee flow ---
 
@@ -252,21 +277,21 @@ contract Kodyl {
         match eventsRec[eid] {
         | EventRec.NoEvent => revertNotFound();
         | EventRec.Ev(org, dep, deadline, start, end_, dispute, cap) =>
-            if (stateOrd(deriveState(cancelledM[eid], start, end_, dispute)) != uint256(0)) {
-                require(false, Error(shr(224, keccakLit("RegistrationClosed()"))));
-            }
+            requireK(stateOrd(deriveState(cancelledM[eid], start, end_, dispute)) == 0,
+                     "RegistrationClosed()");
             registerGuard(statusM[eid][caller()]);
             if (caller_value() != dep) {
-                revertWith2(shr(224, keccakLit("IncorrectDeposit(uint256,uint256)")),
+                revertWith2("IncorrectDeposit(uint256,uint256)",
                             Typedef.rep(dep), Typedef.rep(caller_value()));
             }
-            if (cap > uint256(0) && regCountM[eid] >= cap) {
-                require(false, Error(shr(224, keccakLit("EventFull()"))));
+            match countersM[eid] {
+            | Counters(reg, chk, clm, hld) =>
+                if (cap > 0 && reg >= cap) {
+                    fail("EventFull()");
+                }
+                statusM[eid][caller()] = AttendeeStatus.Registered;
+                countersM[eid] = Counters(reg + 1, chk, clm, addCk(hld, dep));
             }
-
-            statusM[eid][caller()] = AttendeeStatus.Registered;
-            regCountM[eid] = regCountM[eid] + uint256(1);
-            heldM[eid] = addCk(heldM[eid], dep);
             totalHeld = addCk(totalHeld, dep);
 
             solAssert(balanceSelf() >= totalHeld);
@@ -280,14 +305,14 @@ contract Kodyl {
         match eventsRec[eid] {
         | EventRec.NoEvent => revertNotFound();
         | EventRec.Ev(org, dep, deadline, start, end_, dispute, cap) =>
-            if (timeNow() > deadline) {
-                require(false, Error(shr(224, keccakLit("CancellationDeadlinePassed()"))));
-            }
+            requireK(timeNow() <= deadline, "CancellationDeadlinePassed()");
             requireStatus(statusM[eid][caller()], 1);
 
             statusM[eid][caller()] = AttendeeStatus.Cancelled;
-            regCountM[eid] = regCountM[eid] - uint256(1);
-            heldM[eid] = subCk(heldM[eid], dep);
+            match countersM[eid] {
+            | Counters(reg, chk, clm, hld) =>
+                countersM[eid] = Counters(reg - 1, chk, clm, subCk(hld, dep));
+            }
             totalHeld = subCk(totalHeld, dep);
 
             sendValue(caller(), dep);
@@ -305,14 +330,14 @@ contract Kodyl {
         match eventsRec[eid] {
         | EventRec.NoEvent => revertNotFound();
         | EventRec.Ev(org, dep, deadline, start, end_, dispute, cap) =>
-            if (!cancelledM[eid]) {
-                require(false, Error(shr(224, keccakLit("EventNotCancelled()"))));
-            }
+            requireK(cancelledM[eid], "EventNotCancelled()");
             requireStatus(statusM[eid][caller()], 1);
 
             statusM[eid][caller()] = AttendeeStatus.Cancelled;
-            regCountM[eid] = regCountM[eid] - uint256(1);
-            heldM[eid] = subCk(heldM[eid], dep);
+            match countersM[eid] {
+            | Counters(reg, chk, clm, hld) =>
+                countersM[eid] = Counters(reg - 1, chk, clm, subCk(hld, dep));
+            }
             totalHeld = subCk(totalHeld, dep);
 
             sendValue(caller(), dep);
@@ -328,30 +353,30 @@ contract Kodyl {
         match eventsRec[eid] {
         | EventRec.NoEvent => revertNotFound();
         | EventRec.Ev(org, dep, deadline, start, end_, dispute, cap) =>
-            if (stateOrd(deriveState(cancelledM[eid], start, end_, dispute)) != uint256(3)) {
-                require(false, Error(shr(224, keccakLit("NotSettled()"))));
-            }
+            requireK(stateOrd(deriveState(cancelledM[eid], start, end_, dispute)) == 3,
+                     "NotSettled()");
             requireStatus(statusM[eid][caller()], 3);
 
             statusM[eid][caller()] = AttendeeStatus.Claimed;
-            clmCountM[eid] = clmCountM[eid] + uint256(1);
-            let payout = addCk(dep, calcReward(eid, dep));
-            // During normal settlement the pot always covers every remaining
-            // payout, so payout > held can only mean the pot was already swept
-            // to the maintainer after DUST_CLAIM_TIMEOUT. Report that plainly
-            // instead of letting subCk underflow into an opaque Panic(0x11).
-            if (payout > heldM[eid]) {
-                require(false, Error(shr(224, keccakLit("PayoutSwept()"))));
+            match countersM[eid] {
+            | Counters(reg, chk, clm, hld) =>
+                let payout = addCk(dep, calcReward(reg, chk, dep));
+                // During normal settlement the pot always covers every
+                // remaining payout, so payout > held can only mean the pot
+                // was already swept to the maintainer after
+                // DUST_CLAIM_TIMEOUT. Report that plainly instead of letting
+                // subCk underflow into an opaque Panic(0x11).
+                requireK(payout <= hld, "PayoutSwept()");
+                countersM[eid] = Counters(reg, chk, clm + 1, subCk(hld, payout));
+                totalHeld = subCk(totalHeld, payout);
+
+                sendValue(caller(), payout);
+
+                solAssert(balanceSelf() >= totalHeld);
+
+                emitLog3W1(keccakLit("Claimed(uint256,address,uint256)"),
+                           Typedef.rep(eid), Typedef.rep(caller()), Typedef.rep(payout));
             }
-            heldM[eid] = subCk(heldM[eid], payout);
-            totalHeld = subCk(totalHeld, payout);
-
-            sendValue(caller(), payout);
-
-            solAssert(balanceSelf() >= totalHeld);
-
-            emitLog3W1(keccakLit("Claimed(uint256,address,uint256)"),
-                       Typedef.rep(eid), Typedef.rep(caller()), Typedef.rep(payout));
         }
     }
 
@@ -359,13 +384,27 @@ contract Kodyl {
 
     // Per-attendee status flip. The check-in window / cancelled gate is applied
     // once by the callers (requireCheckInOpen). Silently skips anyone not
-    // currently Registered, so batches tolerate invalid entries.
-    function checkInInner(eid : uint256, a : address) -> () {
-        if (statusOrd(statusM[eid][a]) == uint256(1)) {
+    // currently Registered, so batches tolerate invalid entries. Returns the
+    // tally delta (1 = flipped, 0 = skipped): the counters write belongs to
+    // the entry points, once per external call, not per attendee.
+    function checkInInner(eid : uint256, a : address) -> uint256 {
+        if (statusOrd(statusM[eid][a]) == 1) {
             statusM[eid][a] = AttendeeStatus.CheckedIn;
-            chkCountM[eid] = chkCountM[eid] + uint256(1);
             emitLog3(keccakLit("CheckedIn(uint256,address)"),
                      Typedef.rep(eid), Typedef.rep(a));
+            return 1;
+        }
+        return 0;
+    }
+
+    // The one counters read-modify-write behind both check-in entry points.
+    // Skipped entirely when nothing flipped (an all-skips call would otherwise
+    // pay a redundant same-value 4-slot write).
+    function bumpCheckedIn(eid : uint256, n : uint256) -> () {
+        if (n == 0) { return (); }
+        match countersM[eid] {
+        | Counters(reg, chk, clm, hld) =>
+            countersM[eid] = Counters(reg, chk + n, clm, hld);
         }
     }
 
@@ -375,7 +414,7 @@ contract Kodyl {
         | EventRec.Ev(org, dep, deadline, start, end_, dispute, cap) =>
             onlyOrganizerOf(org);
             requireCheckInOpen(cancelledM[eid], start, end_, dispute);
-            checkInInner(eid, a);
+            bumpCheckedIn(eid, checkInInner(eid, a));
         }
     }
 
@@ -384,9 +423,8 @@ contract Kodyl {
         | EventRec.NoEvent => revertNotFound();
         | EventRec.Ev(org, dep, deadline, start, end_, dispute, cap) =>
             onlyOrganizerOf(org);
-            if (stateOrd(deriveState(cancelledM[eid], start, end_, dispute)) != uint256(0)) {
-                require(false, Error(shr(224, keccakLit("EventAlreadyStarted()"))));
-            }
+            requireK(stateOrd(deriveState(cancelledM[eid], start, end_, dispute)) == 0,
+                     "EventAlreadyStarted()");
             cancelledM[eid] = true;
             emitLog2(keccakLit("EventCancelled(uint256)"), Typedef.rep(eid));
         }
@@ -397,7 +435,7 @@ contract Kodyl {
         | EventRec.NoEvent => revertNotFound();
         | EventRec.Ev(org, dep, deadline, start, end_, dispute, cap) =>
             onlyOrganizerOf(org);
-            metadataUris[eid - uint256(1)] = newUri;
+            metadataUris[eid - 1] = newUri;
             emitLog2Str(keccakLit("MetadataUpdated(uint256,string)"),
                         Typedef.rep(eid), newUri);
         }
@@ -409,45 +447,41 @@ contract Kodyl {
         match eventsRec[eid] {
         | EventRec.NoEvent => revertNotFound();
         | EventRec.Ev(org, dep, deadline, start, end_, dispute, cap) =>
-            if (stateOrd(deriveState(cancelledM[eid], start, end_, dispute)) != uint256(3)) {
-                require(false, Error(shr(224, keccakLit("NotSettled()"))));
-            }
-            let allClaimed = clmCountM[eid] == chkCountM[eid];
-            let timeoutPassed = timeNow() > addCk(addCk(end_, dispute), uint256(2592000));
-            if (!allClaimed && !timeoutPassed) {
-                require(false, Error(shr(224, keccakLit("DustNotClaimable()"))));
-            }
-            // The per-event pot IS the dust once every claim is out; no
-            // reliance on the shared contract balance.
-            let dust = heldM[eid];
-            if (dust == uint256(0)) {
-                require(false, Error(shr(224, keccakLit("DustNotClaimable()"))));
-            }
-            heldM[eid] = uint256(0);
-            totalHeld = subCk(totalHeld, dust);
+            requireK(stateOrd(deriveState(cancelledM[eid], start, end_, dispute)) == 3,
+                     "NotSettled()");
+            match countersM[eid] {
+            | Counters(reg, chk, clm, hld) =>
+                let allClaimed = clm == chk;
+                let timeoutPassed = timeNow() > addCk(addCk(end_, dispute), dustClaimTimeout());
+                if (!allClaimed && !timeoutPassed) {
+                    fail("DustNotClaimable()");
+                }
+                // The per-event pot IS the dust once every claim is out; no
+                // reliance on the shared contract balance.
+                let dust = hld;
+                requireK(dust != 0, "DustNotClaimable()");
+                countersM[eid] = Counters(reg, chk, clm, 0);
+                totalHeld = subCk(totalHeld, dust);
 
-            sendValue(maintainer, dust);
+                sendValue(maintainer, dust);
 
-            solAssert(balanceSelf() >= totalHeld);
+                solAssert(balanceSelf() >= totalHeld);
 
-            emitLog3W1(keccakLit("DustClaimed(uint256,address,uint256)"),
-                       Typedef.rep(eid), Typedef.rep(maintainer), Typedef.rep(dust));
+                emitLog3W1(keccakLit("DustClaimed(uint256,address,uint256)"),
+                           Typedef.rep(eid), Typedef.rep(maintainer), Typedef.rep(dust));
+            }
         }
     }
 
     // --- maintainer ---
 
     public function setMaintainer(newMaintainer : address) -> () {
-        if (caller() != maintainer) {
-            require(false, Error(shr(224, keccakLit("NotAuthorized()"))));
-        }
+        requireK(caller() == maintainer, "NotAuthorized()");
         if (Typedef.rep(newMaintainer) == 0) {
-            revertStr1(shr(224, keccakLit("InvalidEventParameters(string)")), 12,
-                       0x5a65726f20616464726573730000000000000000000000000000000000000000);
+            revertStr("InvalidEventParameters(string)", "Zero address");
         }
         if (newMaintainer == maintainer) {
-            revertStr1(shr(224, keccakLit("InvalidEventParameters(string)")), 15,
-                       0x53616d65206d61696e7461696e65720000000000000000000000000000000000);
+            revertStr("InvalidEventParameters(string)", "Same maintainer");
         }
         let old = maintainer;
         maintainer = newMaintainer;
@@ -470,28 +504,31 @@ contract Kodyl {
             requireCheckInOpen(cancelledM[eid], start, end_, dispute);
             let lenPtr = 4 + calldataload(36); // second arg head holds the array offset
             let len = calldataload(lenPtr);
-            if (len > 100) {
-                revertWith2(shr(224, keccakLit("BatchTooLarge(uint256,uint256)")), len, 100);
+            // len is a raw calldata word, so unwrap the cap once for both the
+            // comparison and the revert argument.
+            let maxB = Typedef.rep(maxBatchSize());
+            if (len > maxB) {
+                revertWith2("BatchTooLarge(uint256,uint256)", len, maxB);
             }
+            // Flips accumulate across the loop; the counters record is
+            // read-modified-written ONCE after it, not per attendee.
+            let flips = uint256(0);
             for (let i : word = 0; i < len; i = i + 1) {
                 let w = calldataload(lenPtr + 32 + i * 32);
                 // Strict ABI decoding, matching the std decoder on the typed
                 // path (checkIn): an address word with dirty upper bits
                 // reverts instead of silently no-oping into an unset mapping
                 // key. Same error the std uses, so both paths are uniform.
-                if (shr(160, w) != 0) {
-                    require(false, Error(shr(224, keccakLit("DirtyHigherBitsForAddress()"))));
-                }
-                checkInInner(eid, address(w));
+                requireK(shr(160, w) == 0, "DirtyHigherBitsForAddress()");
+                flips = flips + checkInInner(eid, address(w));
             }
+            bumpCheckedIn(eid, flips);
         }
     }
 
     payable fallback() -> () {
         let sz = calldatasize();
-        if (sz == 0) {
-            require(false, Error(shr(224, keccakLit("TransferFailed()"))));
-        }
+        requireK(sz != 0, "TransferFailed()");
         if (sz >= 4) {
             if (shr(224, calldataload(0)) == shr(224, keccakLit("checkInBatch(uint256,address[])"))) {
                 if (callvalue_() != 0) {

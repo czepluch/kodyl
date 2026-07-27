@@ -1,11 +1,36 @@
-// M0 toolchain probe: exercises constructor args, storage, dispatch, and an
-// opcode wrapper end-to-end. Kept as a minimal worked example of the pipeline.
+// Toolchain probe: exercises constructor args, storage, dispatch, and an
+// opcode wrapper end-to-end, plus a canary for every language feature the
+// showcase migrations lean on. check-core.sh compiles this file FIRST, so
+// toolchain drift fails here - small and labeled - before Kodyl does.
+//
+// Canaries (each maps to a Kodyl.solc pattern):
+//   demandPositive  require(cond, "message") - runtime string literals; the
+//                   native revert is RAW message bytes, not Solidity
+//                   Error(string); CoreProbe.t.sol pins that wire shape
+//   selOf           user-defined Str instance folding keccakLit at compile
+//                   time (the ErrSel error-selector pattern)
+//   pushUri/...     UFCS method calls on a storage array of strings
+//   bareLit         bare integer literal in a non-tail return (the
+//                   call-result/expected-type unification fix)
 import std.{*};
-import std.opcodes.{timestamp};
+import std.opcodes.{timestamp, shr};
 import std.dispatch.{*};
+
+// A selector type constructible from the error-signature literal itself:
+// "X()" folds to its right-aligned 4-byte selector at compile time via the
+// per-literal clone-and-erase of fromString. No runtime cost, no hash
+// constants in source.
+data Sel = Sel(word);
+
+instance Sel : Str {
+    function fromString(s : string) -> Sel {
+        return Sel(shr(224, keccakLit(s)));
+    }
+}
 
 contract Probe {
     stored : uint256;
+    uris : array(string);
 
     constructor(x : uint256) {
         stored = x;
@@ -17,5 +42,44 @@ contract Probe {
 
     public function timeNow() -> uint256 {
         return uint256(timestamp());
+    }
+
+    // require with a runtime-materialized string literal. On failure the
+    // revert payload is the raw UTF-8 bytes of the message (std's Error.Msg
+    // shape) - deliberately NOT the Solidity Error(string) ABI encoding.
+    public function demandPositive(x : uint256) -> uint256 {
+        require(x > 0, "Probe: x must be positive");
+        return x;
+    }
+
+    // The literal resolves through the Sel : Str instance above and folds to
+    // the canonical selector of EventNotFound() as a compile-time constant.
+    public function selOf() -> uint256 {
+        let e : Sel = "EventNotFound()";
+        match e {
+        | Sel(w) => return uint256(w);
+        }
+    }
+
+    // UFCS storage-array methods on a contract field.
+    public function pushUri(u : memory(string)) -> () {
+        uris.push(u);
+    }
+
+    public function uriCount() -> uint256 {
+        return uris.length();
+    }
+
+    public function uriAt(i : uint256) -> memory(string) {
+        return uris[i];
+    }
+
+    // Bare literal in a non-tail return: rejected before the
+    // call-expected-type unification landed, accepted at the current pin.
+    // (Parameter is uint256, not bool: the std has ABI encoding for bool
+    // returns but no calldata decoder instance for bool parameters.)
+    public function bareLit(x : uint256) -> uint256 {
+        if (x > 0) { return 0; }
+        return 1;
     }
 }

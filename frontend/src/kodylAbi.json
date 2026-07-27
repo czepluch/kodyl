@@ -1,5 +1,9 @@
 [
   {
+    "type": "fallback",
+    "stateMutability": "payable"
+  },
+  {
     "type": "function",
     "name": "DUST_CLAIM_TIMEOUT",
     "inputs": [],
