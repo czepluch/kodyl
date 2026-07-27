@@ -77,5 +77,9 @@ cd frontend && npm install && npm run dev  # http://localhost:5173
 - Reads refresh on each new block (state only changes when a block is mined),
   with JSON-RPC batching so a tick is one HTTP request.
 - The dev keys in `config.ts` are anvil's well-known ones. Local demo only.
-- `npm run dev` (esbuild) runs without a typecheck; `npm run build` (tsc) is
-  stricter and may want a couple of viem type touch-ups.
+- Chain gating: the demo accounts, the chain-clock controls, and the demo
+  drawer appear only when `deployment.json` records chain id 31337 (local
+  anvil). On any other chain the app is wallet-only and `walletFor` refuses to
+  build a dev-key signer.
+- `npm run dev` (esbuild) skips the typecheck; `npm run build` runs `tsc`
+  strictly and passes clean.

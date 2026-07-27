@@ -6,8 +6,8 @@ import { type EventView } from './useKodyl'
 import { type RosterEntry, getRoster } from './logs'
 import { encodeMetadata, useMetadata } from './metadata'
 import { to } from './router'
-import { fmtEth, fmtTime, shortAddr, toLocalInput } from './format'
-import { EventActions, EventCard, JumpButton, StateBadge, isOrganizer } from './components'
+import { fmtDuration, fmtEth, fmtTime, shortAddr, toLocalInput } from './format'
+import { EventActions, EventCard, JumpButton, StateBadge, isOrganizer, nextPhaseTs, payoutSwept } from './components'
 
 const DAY = 86400
 const MIN_START_AHEAD = 3 * 3600
@@ -78,7 +78,22 @@ export function EventPage({ id }: { id: bigint }) {
         </div>
       </div>
       {meta?.description && <p className="desc">{meta.description}</p>}
-      {meta?.location && <p className="loc">📍 {meta.location}</p>}
+      {meta?.location && <p className="loc">{meta.location}</p>}
+      {ev.state < 3 && !ev.cancelled && (
+        <p className="countdown">
+          &rarr; {STATE_LABELS[ev.state + 1] ?? 'Settled'} in {fmtDuration(Number(nextPhaseTs(ev)) - now)}
+        </p>
+      )}
+      {ev.state === 2 && ev.myStatus === 3 && (
+        <>
+          <p className="countdown">
+            Your payout ({fmtEth(ev.deposit + ev.reward)}) unlocks in {fmtDuration(Number(nextPhaseTs(ev)) - now)}.
+          </p>
+          <p className="countdown">
+            Claims open at settlement: the organizer can still approve late check-ins during the dispute period.
+          </p>
+        </>
+      )}
 
       <div className="grid wide">
         <div><span>Organizer</span><b title={ev.organizer}>{shortAddr(ev.organizer)}{isOrganizer(ev, session.address) ? ' (you)' : ''}</b></div>
@@ -86,14 +101,16 @@ export function EventPage({ id }: { id: bigint }) {
         <div><span>Registered</span><b>{ev.registeredCount.toString()}{ev.maxAttendees > 0n ? ` / ${ev.maxAttendees}` : ''}</b></div>
         <div><span>Checked in</span><b>{ev.checkedInCount.toString()}</b></div>
         <div><span>Claimed</span><b>{ev.claimedCount.toString()}</b></div>
-        <div><span>Reward / attendee</span><b>{fmtEth(ev.reward)}</b></div>
+        {/* The reward is a moving projection until Settled: one late check-in
+            during Dispute can change it several-fold. */}
+        <div><span>Reward / attendee</span><b>{fmtEth(ev.reward)}{ev.state < 3 ? ' (projected)' : ''}</b></div>
         <div><span>Starts</span><b>{fmtTime(ev.eventStart)}</b></div>
         <div><span>Ends</span><b>{fmtTime(ev.eventEnd)}</b></div>
         <div><span>Cancel by</span><b>{fmtTime(ev.cancellationDeadline)}</b></div>
         <div><span>Your status</span><b>{STATUS_LABELS[ev.myStatus] ?? '?'}</b></div>
       </div>
 
-      <EventActions ev={ev} />
+      <EventActions ev={ev} roster={roster ?? []} />
 
       <h3 className="roster-h">Attendees <span className="muted">(from event logs)</span></h3>
       {roster === null ? (
@@ -130,7 +147,8 @@ export function MyTickets() {
   const { events, session, loading } = useApp()
   const mine = events.filter((e) => e.myStatus !== 0)
   const upcoming = mine.filter((e) => e.state < 3 && !e.cancelled)
-  const toClaim = mine.filter((e) => (e.state === 3 && e.myStatus === 3) || (e.cancelled && e.myStatus === 1))
+  // A swept payout is no longer claimable - it must not read as "Action needed".
+  const toClaim = mine.filter((e) => (e.state === 3 && e.myStatus === 3 && !payoutSwept(e)) || (e.cancelled && e.myStatus === 1))
   const past = mine.filter((e) => !upcoming.includes(e) && !toClaim.includes(e))
 
   if (!session.connected) return <p className="muted">Connect a wallet or pick a demo account to see your tickets.</p>

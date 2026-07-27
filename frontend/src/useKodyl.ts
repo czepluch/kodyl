@@ -6,6 +6,7 @@
 // fields are re-read.
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { abi, CONTRACT, publicClient } from './config'
+import { ensureSynced } from './logs'
 
 export type EventView = {
   id: bigint
@@ -88,6 +89,8 @@ export function useKodyl(me: `0x${string}`) {
   const [error, setError] = useState<string | null>(null)
   const cache = useRef<Map<string, Params>>(new Map())
   const seq = useRef(0)
+  // Last observed block timestamp and the wall clock at which we saw it.
+  const anchor = useRef({ ts: 0, at: 0 })
 
   const refresh = useCallback(async () => {
     const my = ++seq.current
@@ -106,7 +109,8 @@ export function useKodyl(me: `0x${string}`) {
       setTotalHeld(held)
       setMaintainer(maint)
       setBalance(bal)
-      setNow(Number(block.timestamp))
+      anchor.current = { ts: Number(block.timestamp), at: Date.now() }
+      setNow(anchor.current.ts)
       setError(null)
     } catch (e) {
       if (my === seq.current) setError(e instanceof Error ? e.message : 'read failed')
@@ -117,12 +121,32 @@ export function useKodyl(me: `0x${string}`) {
   }, [me])
 
   useEffect(() => {
+    ensureSynced().catch(() => {})
     refresh()
     // Every state change requires a mined block, so watching blocks catches
-    // txs and time warps without a wasteful fixed poll.
-    const unwatch = publicClient.watchBlocks({ emitOnBegin: false, onBlock: () => refresh() })
+    // txs and time warps without a wasteful fixed poll. The block drives the
+    // log store too; passing block.number spares it an eth_blockNumber.
+    const unwatch = publicClient.watchBlocks({
+      emitOnBegin: false,
+      onBlock: (block) => {
+        ensureSynced(block.number).catch(() => {})
+        refresh()
+      },
+    })
     return () => unwatch()
   }, [refresh])
+
+  // The displayed clock ticks on wall time between blocks (so countdowns move
+  // on anvil without mining) and re-anchors to the block timestamp on every
+  // refresh. Contract state stays strictly block-derived: getState and every
+  // other field come from on-chain reads, never from this clock.
+  useEffect(() => {
+    const t = setInterval(() => {
+      const { ts, at } = anchor.current
+      if (ts > 0) setNow(ts + Math.floor((Date.now() - at) / 1000))
+    }, 1000)
+    return () => clearInterval(t)
+  }, [])
 
   return { events, totalHeld, balance, maintainer, now, loading, error, refresh }
 }

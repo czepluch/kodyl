@@ -1,6 +1,12 @@
 // Display helpers shared across the UI.
 import { formatEther } from 'viem'
 
+// Mirrors the contract's DUST_CLAIM_TIMEOUT (30 days, in seconds): once
+// eventEnd + disputePeriod + this has passed, claimDust may sweep the whole
+// remaining pot even with payouts still unclaimed. Before that it requires
+// claimedCount == checkedInCount.
+export const DUST_CLAIM_TIMEOUT = 2592000
+
 export function fmtTime(ts: bigint | number): string {
   return new Date(Number(ts) * 1000).toLocaleString()
 }

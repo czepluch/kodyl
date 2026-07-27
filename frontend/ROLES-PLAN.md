@@ -1,6 +1,12 @@
 # Kodyl frontend: role-based views - design plan
 
-Status: proposal for discussion. No code changes yet.
+Status: implemented through Phase 1 and most of Phase 2 - role views with the
+demo-controls drawer, structured `data:` URI metadata behind
+`resolveMetadata`, wallet connect via `custom(window.ethereum)`, and single +
+batch check-in from the roster. Still open: an edit-metadata UI
+(`setMetadataURI`), a `setMaintainer` control, and the Phase 3 items (real
+IPFS metadata, search/filters, share links, calendar export, an indexer if
+log-scanning gets slow).
 
 ## 0. The reframing: there is no "admin"
 

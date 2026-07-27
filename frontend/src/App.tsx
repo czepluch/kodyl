@@ -58,7 +58,7 @@ export default function App() {
         {toast && <div className={`toast ${toast.kind}`}>{toast.msg}</div>}
         {data.error && (
           <div className="toast err">
-            Can&rsquo;t reach the chain &mdash; is anvil running and the contract deployed? ({data.error})
+            Can&rsquo;t reach the chain: is anvil running and the contract deployed? ({data.error})
           </div>
         )}
 

@@ -1,24 +1,54 @@
-// Write actions and the lifecycle-clock control. Writes are sent from the
-// selected anvil account (impersonated) and awaited to a receipt; revert
-// reasons are decoded against the hand-authored ABI (which carries the errors
-// the compiler could not emit).
-import { type Hex, BaseError, ContractFunctionRevertedError } from 'viem'
-import { abi, CONTRACT, publicClient, testClient, walletFor } from './config'
+// Revert decoding and the lifecycle-clock control. Writes live in session.ts
+// (sendTx); revert reasons are decoded against the hand-authored ABI (which
+// carries the errors the compiler could not emit). The clock controls exist
+// only on the local anvil chain - testClient is null everywhere else.
+import { BaseError, ContractFunctionRevertedError } from 'viem'
+import { STATUS_LABELS, publicClient, testClient } from './config'
+import { fmtEth } from './format'
 
-export async function send(pk: Hex, functionName: string, args: unknown[], value?: bigint): Promise<void> {
-  const wallet = walletFor(pk)
-  const hash = await wallet.writeContract({ address: CONTRACT, abi, functionName, args, value })
-  const receipt = await publicClient.waitForTransactionReceipt({ hash })
-  if (receipt.status !== 'success') throw new Error('transaction reverted')
+const statusLabel = (v: unknown) => STATUS_LABELS[Number(v)] ?? String(v)
+
+// One short neutral sentence per contract error (names from kodylAbi.json).
+// Anything unmapped falls back to the raw Name(args) form below.
+const FRIENDLY: Record<string, (args: readonly unknown[]) => string> = {
+  EventNotFound: () => 'That event does not exist.',
+  RegistrationClosed: () => 'Registration is closed for this event.',
+  AlreadyRegistered: () => 'This address is already registered.',
+  IncorrectDeposit: (a) =>
+    a.length >= 2
+      ? `The deposit must be exactly ${fmtEth(a[0] as bigint)} (got ${fmtEth(a[1] as bigint)}).`
+      : 'The deposit does not match the required amount.',
+  EventFull: () => 'The event is full.',
+  CancellationDeadlinePassed: () => 'The cancellation deadline has passed.',
+  EventNotCancelled: () => 'The event is not cancelled, so there is no refund.',
+  NotSettled: () => 'The event is not settled yet.',
+  PayoutSwept: () => 'The payout was swept to the maintainer after the claim timeout.',
+  CheckInWindowClosed: () => 'The check-in window has closed.',
+  BatchTooLarge: (a) =>
+    a.length >= 2 ? `The batch has ${a[0]} attendees; the limit is ${a[1]}.` : 'The check-in batch is too large.',
+  NotOrganizer: () => 'Only the event organizer can do that.',
+  NotAuthorized: () => 'This account is not authorized to do that.',
+  DustNotClaimable: () => 'Dust is not claimable yet: payouts are still unclaimed and the timeout has not passed.',
+  InvalidAttendeeStatus: (a) =>
+    a.length >= 2
+      ? `The attendee status is ${statusLabel(a[0])}, but this action requires ${statusLabel(a[1])}.`
+      : 'The attendee status does not allow this action.',
+  InvalidEventParameters: (a) => (a.length ? String(a[0]) : 'The event parameters are invalid.'),
+  TransferFailed: () => 'The ETH transfer failed.',
+  NonPayableReceivedValue: () => 'This function does not accept ETH.',
+  DirtyHigherBitsForAddress: () => 'The address argument is malformed (non-zero upper bits).',
+  EventAlreadyStarted: () => 'The event has already started.',
 }
 
-// Turn a viem revert into the contract's named error, e.g. "PayoutSwept" or
-// "InvalidEventParameters(Deposit must be > 0)".
+// Turn a viem revert into a human sentence when the error is known, else the
+// contract's named form, e.g. "InvalidEventParameters(Deposit must be > 0)".
 export function decodeError(err: unknown): string {
   if (err instanceof BaseError) {
     const revert = err.walk((e) => e instanceof ContractFunctionRevertedError)
     if (revert instanceof ContractFunctionRevertedError && revert.data) {
       const { errorName, args } = revert.data
+      const friendly = FRIENDLY[errorName]
+      if (friendly) return friendly(args ?? [])
       return args && args.length ? `${errorName}(${args.join(', ')})` : errorName
     }
     return err.shortMessage
@@ -26,18 +56,25 @@ export function decodeError(err: unknown): string {
   return err instanceof Error ? err.message : String(err)
 }
 
-// --- lifecycle clock (anvil time control) ---
+// --- lifecycle clock (anvil time control; local chain only) ---
+
+function clock() {
+  if (!testClient) throw new Error('Chain-clock control exists only on the local anvil chain.')
+  return testClient
+}
 
 export async function warpBy(seconds: number): Promise<void> {
+  const tc = clock()
   const block = await publicClient.getBlock()
-  await testClient.setNextBlockTimestamp({ timestamp: block.timestamp + BigInt(seconds) })
-  await testClient.mine({ blocks: 1 })
+  await tc.setNextBlockTimestamp({ timestamp: block.timestamp + BigInt(seconds) })
+  await tc.mine({ blocks: 1 })
 }
 
 export async function warpTo(unixTs: bigint): Promise<void> {
+  const tc = clock()
   const block = await publicClient.getBlock()
   // Never move time backwards (the EVM forbids it).
   const target = unixTs > block.timestamp ? unixTs : block.timestamp + 1n
-  await testClient.setNextBlockTimestamp({ timestamp: target })
-  await testClient.mine({ blocks: 1 })
+  await tc.setNextBlockTimestamp({ timestamp: target })
+  await tc.mine({ blocks: 1 })
 }

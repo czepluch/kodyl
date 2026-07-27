@@ -27,9 +27,12 @@ CTOR="$(cast abi-encode 'c(address)' "$MAINTAINER")"
 RECEIPT="$(cast send --rpc-url "$RPC" --private-key "$KEY" --create "0x${INIT}${CTOR#0x}" --json)"
 ADDR="$(echo "$RECEIPT" | jq -r .contractAddress)"
 CHAINID="$(cast chain-id --rpc-url "$RPC")"
+# Receipt blockNumber is hex; the frontend wants a decimal log-scan floor.
+DEPLOY_BLOCK="$(printf '%d' "$(echo "$RECEIPT" | jq -r .blockNumber)")"
 
 echo "  deployed at:  $ADDR"
 echo "  chain id:     $CHAINID"
+echo "  deploy block: $DEPLOY_BLOCK"
 echo "  code on-chain: $(( ${#ADDR} > 0 ? $(cast code --rpc-url "$RPC" "$ADDR" | wc -c) / 2 : 0 )) bytes"
 
 mkdir -p "$ROOT/frontend/src"
@@ -37,7 +40,8 @@ cat > "$ROOT/frontend/src/deployment.json" <<EOF
 {
   "address": "$ADDR",
   "chainId": $CHAINID,
-  "rpcUrl": "$RPC"
+  "rpcUrl": "$RPC",
+  "deployBlock": $DEPLOY_BLOCK
 }
 EOF
 echo "  wrote frontend/src/deployment.json"

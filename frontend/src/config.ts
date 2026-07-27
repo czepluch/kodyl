@@ -1,12 +1,11 @@
-// Chain / contract / account configuration for the local-testnet demo.
+// Chain / contract / account configuration, driven by the deployment record
+// (deployment.json, written by scripts/deploy-anvil.sh).
 //
-// The contract is impersonated through anvil's unlocked default accounts (no
-// MetaMask needed): reads go through a viem public client, writes through a
-// per-account wallet client, and the lifecycle clock is driven by a viem test
-// client. wagmi provides the React config/provider.
-import { http, createConfig } from 'wagmi'
-import { foundry } from 'wagmi/chains'
-import { type Abi, type Hex, createPublicClient, createTestClient, createWalletClient } from 'viem'
+// Reads go through a viem public client. Demo-mode writes (anvil's unlocked
+// accounts) and the lifecycle clock exist ONLY on the local chain: the bundled
+// dev keys must be structurally unable to sign for anything but 31337.
+import { type Abi, type Hex, createPublicClient, createTestClient, createWalletClient, defineChain, http } from 'viem'
+import { foundry, mainnet, sepolia } from 'viem/chains'
 import { privateKeyToAccount } from 'viem/accounts'
 import abiJson from './kodylAbi.json'
 import deployment from './deployment.json'
@@ -14,17 +13,27 @@ import deployment from './deployment.json'
 export const abi = abiJson as Abi
 export const CONTRACT = deployment.address as `0x${string}`
 export const RPC_URL = (deployment as { rpcUrl?: string }).rpcUrl ?? 'http://127.0.0.1:8545'
+const CHAIN_ID = deployment.chainId
 
-// Point the Foundry chain (id 31337) at the deployment's RPC.
+// THE gate: every anvil-only affordance (dev-key signing, clock control, the
+// demo drawer) keys off the recorded chain id, not a build flag.
+export const isLocalChain = CHAIN_ID === 31337
+
+const PRESETS = [foundry, sepolia, mainnet]
+const base =
+  PRESETS.find((c) => c.id === CHAIN_ID) ??
+  defineChain({
+    id: CHAIN_ID,
+    name: `Chain ${CHAIN_ID}`,
+    nativeCurrency: { name: 'Ether', symbol: 'ETH', decimals: 18 },
+    rpcUrls: { default: { http: [RPC_URL] } },
+  })
+
+// Whatever the preset says, RPC traffic goes to the recorded endpoint.
 export const chain = {
-  ...foundry,
+  ...base,
   rpcUrls: { default: { http: [RPC_URL] }, public: { http: [RPC_URL] } },
 }
-
-export const wagmiConfig = createConfig({
-  chains: [chain],
-  transports: { [chain.id]: http(RPC_URL, { batch: true }) },
-})
 
 // batch: true coalesces the many per-tick eth_calls into single HTTP requests
 // (anvil has no Multicall3). pollingInterval drives watchBlocks below.
@@ -33,7 +42,12 @@ export const publicClient = createPublicClient({
   transport: http(RPC_URL, { batch: true }),
   pollingInterval: 1500,
 })
-export const testClient = createTestClient({ chain, mode: 'anvil', transport: http(RPC_URL) })
+
+// anvil's clock control: null off the local chain, so no code path can hold a
+// test client against a public network.
+export const testClient = isLocalChain
+  ? createTestClient({ chain, mode: 'anvil', transport: http(RPC_URL) })
+  : null
 
 // anvil's well-known default accounts. DEV KEYS - local demo only, never real funds.
 type Acct = { label: string; role: string; pk: Hex }
@@ -49,7 +63,10 @@ export const ACCOUNTS = RAW.map((a) => ({
   address: privateKeyToAccount(a.pk).address,
 }))
 
+// The only constructor of a dev-key signer. Throws before building a wallet
+// client when the deployment is not local anvil.
 export function walletFor(pk: Hex) {
+  if (!isLocalChain) throw new Error('Demo keys sign only on the local anvil chain (31337).')
   return createWalletClient({ account: privateKeyToAccount(pk), chain, transport: http(RPC_URL) })
 }
 
