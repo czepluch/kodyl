@@ -1,60 +1,68 @@
 # Kodyl
 
-> Decentralized event management with skin-in-the-game incentives
+> Event deposits with skin in the game, implemented in **Core Solidity**.
 
-## Overview
+Attendees stake a deposit to register for an event. Show up and reclaim it plus
+a pro-rata share of the no-shows' forfeited deposits; don't show up and you lose
+your stake. Leftover rounding dust goes to a protocol maintainer. The concept is
+a tribute to [Kickback](https://kickback.events/).
 
-Kodyl is a decentralized event management protocol where attendees stake a small deposit when registering for an event. Show up and get your deposit back (plus a share of no-show deposits). Don't show up? You lose your stake.
+## What this repo is
 
-**Key Features:**
-- Deposit-based registration with automatic refund for attendees
-- Pro-rata distribution of no-show deposits to attendees
-- Dispute period for late check-in approvals
-- Configurable cancellation deadlines
-- Factory pattern (one contract per event) for isolation and security
+This is a from-scratch implementation of Kodyl in
+[**Core Solidity**](https://github.com/argotorg/solcore) (`.solc`), the
+research language compiled by `sol-core`. It is a deliberate exercise in
+building a real, non-trivial contract on the language as it exists today -
+leaning into what it does well (payload-carrying ADTs as first-class storage,
+exhaustive `match`, typeclass-derived encoding) and documenting where it does
+not yet reach (checked arithmetic, events, dynamic-array params - all shimmed).
 
-## Inspiration
+There is no "classic Solidity" version here; the design is native to Core
+Solidity (a **singleton** holding all events as ADT values in a map, rather than
+the factory-deploys-one-contract-per-event shape Solidity would push you
+toward). See [`core/README.md`](./core/README.md) for the design and the full
+list of numbered deviations, and [`core/COVERAGE.md`](./core/COVERAGE.md) for
+how every mechanic in [`spec.md`](./spec.md) maps to a test.
 
-This project is heavily inspired by [Kickback](https://kickback.events/), which pioneered the concept of stake-based event attendance. Kickback was a brilliant idea that solved real problems around event no-shows using blockchain incentives.
+## Layout
 
-Kodyl is a learning experiment and tribute to Kickback - reimagining the concept with:
-- Educational focus on Solidity best practices
-- Open-source public good approach
-- Simplified architecture for clarity and security
-- Potential to build something useful while honoring the original vision
+| Path | What |
+|---|---|
+| `core/Kodyl.solc` | the contract - the whole protocol, one singleton |
+| `core/kodyl.solc` | shared module: the infrastructure the language doesn't provide yet (checked-math shims, revert/event builders, env wrappers) |
+| `core/Probe.solc` | a toolchain canary that exercises the full compile pipeline |
+| `core/README.md`, `core/COVERAGE.md` | design + deviations, and the spec-to-test map |
+| `scripts/check-core.sh` | the compile pipeline: `sol-core` -> `yule` -> `solc` -> deployable hex |
+| `scripts/deploy-anvil.sh`, `scripts/seed-anvil.sh` | deploy + seed a local node |
+| `test/` | a **Foundry harness** (Solidity) that deploys the compiled Core bytecode and drives it - the tests are how the port is verified |
+| `frontend/` | a React + viem demo dApp (see `frontend/README.md`) |
+| `spec.md` | the language-agnostic protocol specification |
 
-## Documentation
+## Toolchain
 
-For detailed technical specification, architecture decisions, data models, and security considerations, see [spec.md](./spec.md).
+The contract is compiled by an external pipeline, not `forge`. `sol-core` and
+`yule` are built from a pinned solcore checkout; `scripts/check-core.sh` records
+the exact paths. Foundry is present purely as a **test harness**: `forge test`
+compiles the `test/` Solidity, which reads `core/build/*.hex` and deploys it.
+(That is why `foundry.toml` sets `src = "test"` - there is no Solidity `src`
+tree.)
 
-## Development
-
-This project uses [Foundry](https://book.getfoundry.sh/) for Ethereum smart contract development.
-
-### Build
-
-```shell
-forge build
-```
-
-### Test
-
-```shell
-forge test
-```
-
-### Format
-
-```shell
-forge fmt
-```
-
-### Gas Snapshots
+## Build & test
 
 ```shell
-forge snapshot
+./scripts/check-core.sh      # compile the Core Solidity contract to bytecode
+forge test                   # deploy that bytecode in forge and verify behaviour
 ```
+
+For the demo dApp against a local anvil node, see [`frontend/README.md`](./frontend/README.md).
+
+## Status
+
+Core Solidity is a research language and nowhere near production. This repo is a
+showcase of its current state, not a deployment target. The accounting is
+adversarially tested (reentrancy, indivisible-amount conservation, full-lifecycle
+invariants), but the language, the compiler, and this contract are all young.
 
 ## License
 
-MIT (pending - to be added)
+MIT (pending).

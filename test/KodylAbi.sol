@@ -6,8 +6,8 @@ pragma solidity ^0.8.33;
 ///         for the functions only (events and errors are hand-rolled logs and
 ///         selectors it cannot see), so this hand-authored interface is the
 ///         source for a complete ABI - run `forge inspect` on it. The behavior
-///         of every signature here is verified by the test/core suites; this is
-///         the ABI mirror of that tested surface.
+///         of every signature here is verified by the test suites; this is the
+///         ABI mirror of that tested surface.
 interface KodylAbi {
     // ---- events (hand-rolled via log opcodes in Kodyl.solc) ----
     event EventCreated(

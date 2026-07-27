@@ -1,109 +1,87 @@
-# Kodyl - Agent Guidelines
+# Kodyl - agent guidelines
 
-## Project Purpose
+## What this is
 
-Kodyl is a decentralized event management protocol with skin-in-the-game incentives. Attendees stake deposits when registering; they get deposits back (plus rewards from no-shows) if they attend.
+Kodyl implemented in **Core Solidity** (`.solc`, the solcore research language).
+Event-deposit protocol: stake to register, checked-in attendees reclaim their
+deposit plus a pro-rata share of no-show forfeitures, dust to a maintainer. See
+`spec.md` for the concept and `core/README.md` for the design + numbered
+deviations. There is **no classic-Solidity version** in this repo, and we don't
+want one - the point is the Core Solidity implementation.
 
-**Key goals:**
-- Educational project showcasing Solidity best practices
-- Open-source public good
-- Simplicity and security above all else
+## Architecture
 
-## Architecture Overview
+A **singleton**: one `Kodyl` contract holds every event. An event is a
+payload-carrying ADT (`data EventRec = NoEvent | Ev(...)`) stored in a mapping
+keyed by a sequential id; `createEvent` is a state write, not a deployment.
+Attendee status is a nested mapping; lifecycle state is derived from timestamps
+and matched on. Custody is shared: one contract balance, tracked by a per-event
+pot (`heldM`) and a global ledger (`totalHeld`).
 
-```
-contracts/
-├── KodylFactory.sol  # Deploys event contracts
-├── KodylEvent.sol    # One instance per event
-└── interfaces/
-    └── IKodylEvent.sol
+Core files:
+- `core/Kodyl.solc` - the contract.
+- `core/kodyl.solc` - shared module (`import lib.kodyl.{*}`): checked-math
+  shims, revert/event builders, env wrappers, validation. This is the
+  "infrastructure the language doesn't have yet" layer.
+- `core/Probe.solc` - toolchain canary.
+- `test/*.sol` - Foundry harness (deploys the compiled bytecode, drives it).
+- `test/KodylAbi.sol` - hand-authored interface; `forge inspect` on it produces
+  the complete ABI (the compiler emits functions only, not events/errors).
 
-test/
-├── unit/                    # Per-function tests
-├── invariant/               # Fuzz tests for invariants
-└── integration/             # Full lifecycle tests
-```
-
-## Key Invariants
-
-These MUST always hold - test aggressively:
-
-1. `address(this).balance == registeredCount * depositAmount + dust`
-2. No double claims
-3. No refunds after cancellation deadline
-4. Settlement only after dispute period ends
-5. Check-ins only during valid window
-
-## Coding Standards
-
-### Solidity
-
-- Target version: 0.8.33
-- Use custom errors (not require strings)
-- NatSpec on all public/external functions
-- Follow FREI-PI pattern for all state-changing functions
-- CEI (Checks-Effects-Interactions) for reentrancy protection
-
-### Testing
-
-- Use Foundry/Forge exclusively
-- Run `forge fmt` before committing
-- Invariant tests are critical - every invariant needs fuzz coverage
-- Test edge cases: exactly at deadlines, capacity limits, zero attendees
-
-### Security
-
-- No `tx.origin` for auth
-- External calls always last
-- No unbounded loops
-- Document trust assumptions in comments
-
-## Event Lifecycle States
-
-States are **derived from timestamps**, not stored:
+## Build & test
 
 ```
-Registration → Active → Dispute → Settled
-     ↓
- Cancelled (if organizer cancels before event starts)
+./scripts/check-core.sh      # .solc -> hull -> Yul -> hex (external pipeline)
+forge test                   # forge is a HARNESS only; deploys core/build/*.hex
 ```
 
-```solidity
-function getState() public view returns (State) {
-    if (cancelled) return State.Cancelled;
-    if (block.timestamp < eventStart) return State.Registration;
-    if (block.timestamp <= eventEnd) return State.Active;
-    if (block.timestamp <= eventEnd + disputePeriod) return State.Dispute;
-    return State.Settled;
-}
-```
+Toolchain is pinned in `scripts/check-core.sh` to the solcore checkout that
+built the installed `sol-core`/`yule`. **Do not modify the solcore repo.** After
+editing a `.solc` file, always `check-core.sh` then `forge test` - the tests
+assert selectors, event topics, and revert payloads byte-for-byte, so a
+hand-rolled encoding mistake surfaces immediately.
 
-## Current Scope (MVP)
+## Key invariants (test aggressively)
 
-- Factory pattern (one contract per event)
-- ETH deposits only
-- Manual check-in by organizer only (single + batch, max 100 per batch)
-- Pro-rata no-show distribution
-- Dispute period for late approvals
-- Configurable cancellation deadline (min 2h before event)
-- Individual `claim()` and batch `settleAll()`
-- `claimDust()` to project maintainer
+1. `balance >= totalHeld` after every ETH movement. The direction is `>=`, not
+   `==`: forced ETH (selfdestruct / block rewards) can push the balance above
+   the ledger and cannot be rejected, so `==` would permanently brick every
+   flow. This bug was found in review - do not tighten it back.
+2. Per-event pot conservation: each event's `held` equals its deposits minus its
+   payouts. No cross-event leakage.
+3. No double claims / refunds (status transitions are terminal where required).
+4. Claims only after settlement; check-ins only in Active/Dispute (a cancelled
+   event never opens check-in - otherwise a deposit strands).
 
-## Out of Scope (Future)
+`test/KodylAccounting.t.sol` and `test/KodylConservation.t.sol` cover the
+shared-custody accounting; `test/KodylInvariant.t.sol` fuzzes the ledger.
 
-- ERC20 tokens
-- DeFi yield integrations
-- Alternative distribution (lottery, annual payout)
-- DAO governance
-- Privacy features (ZK proofs)
-- Protocol fees
-- Self-check-in (too easy to share with friends)
+## Core Solidity gotchas (all shimmed in core/kodyl.solc)
+
+- **Arithmetic wraps** - no 0.8 checked semantics. Use `addCk/subCk/mulCk`
+  exactly where the logic must be checked; `panic()` reproduces `Panic(...)`.
+- **`&&`/`||` do not short-circuit** - both operands always evaluate. Audit
+  every guard.
+- **No `event`/`emit`** - events are hand-rolled `log1..log3`; topic0 via
+  compile-time-folded `keccakLit("Sig(...)")`.
+- **No `receive`, and dynamic-array params are a decoder stub** - both handled
+  in the `payable fallback` (empty calldata rejects ETH; `checkInBatch` is
+  decoded from calldata by hand).
+- **String literals are compile-time only** - revert reason strings are
+  precomputed packed words with the plaintext in comments.
+- **`match` has no guards** - condition-in-arm isn't supported; match the shape,
+  then `if` inside the arm.
+- **Errors with args** are hand-built payloads matching `abi.encodeWithSelector`.
+- Zero `assembly` blocks in our code - every opcode is an imported typed
+  function.
+
+## Frontend
+
+`frontend/` is a React + viem demo (roles: Discover / My tickets / Organize).
+`frontend/src/kodylAbi.json` is generated from `test/KodylAbi.sol`. See
+`frontend/README.md`.
 
 ## Networks
 
-- **Development/Testing**: Sepolia
-- **Production**: Mainnet, major L2s (future)
-
-## Reference
-
-See `spec.md` for full specification including data models, security considerations, and frontend requirements.
+Local `anvil` only (via `scripts/deploy-anvil.sh`). Not deployed anywhere; Core
+Solidity is a research language, not production-ready.

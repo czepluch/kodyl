@@ -46,13 +46,14 @@ Build and test:
 
 ```
 ./scripts/check-core.sh          # sol-core -> yule -> solc, pinned toolchain
-forge test --match-path 'test/core/*'
+forge test                       # forge is a harness only (see foundry.toml)
 ```
 
-`test/core/Kodyl.t.sol` (39 scenarios) and `test/core/KodylInvariant.t.sol`
-(128k-call ledger fuzz across three concurrent events) drive the compiled
-bytecode through a typed Solidity interface inside forge - selectors, event
-topics, and revert payloads are asserted byte-for-byte.
+`test/Kodyl.t.sol` (41 scenarios) and `test/KodylInvariant.t.sol` (128k-call
+ledger fuzz across three concurrent events), plus `test/KodylAccounting.t.sol`
+and `test/KodylConservation.t.sol` (reentrancy + full-lifecycle conservation),
+drive the compiled bytecode through a typed Solidity interface inside forge -
+selectors, event topics, and revert payloads are asserted byte-for-byte.
 
 ## What the language provides vs what the module shims
 

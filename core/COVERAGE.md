@@ -1,8 +1,7 @@
 # spec.md coverage map
 
 Every mechanic and invariant in `spec.md` mapped to the tests that verify it
-against the compiled Core Solidity bytecode (`test/core/Kodyl.t.sol` unless
-noted).
+against the compiled Core Solidity bytecode (`test/Kodyl.t.sol` unless noted).
 
 ## Core mechanics
 
