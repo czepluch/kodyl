@@ -108,8 +108,8 @@ function balanceSelf() -> uint256 {
 
 // --- Solidity 0.8 semantics shims ---
 // Core Solidity arithmetic wraps and its assert hits the invalid opcode, so
-// Panic(uint256) reverts are reproduced by hand exactly where the Solidity
-// source relied on checked math (deviation 5).
+// Panic(uint256) reverts are reproduced by hand exactly where the logic
+// needs checked math (the checked-arithmetic shim).
 
 function panic(code : word) -> () {
     let p = get_free_memory();

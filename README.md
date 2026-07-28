@@ -21,7 +21,7 @@ There is no "classic Solidity" version here; the design is native to Core
 Solidity (a **singleton** holding all events as ADT values in a map, rather than
 the factory-deploys-one-contract-per-event shape Solidity would push you
 toward). See [`core/README.md`](./core/README.md) for the design and the full
-list of numbered deviations, and [`core/COVERAGE.md`](./core/COVERAGE.md) for
+list of deviations, and [`core/COVERAGE.md`](./core/COVERAGE.md) for
 how every mechanic in [`spec.md`](./spec.md) maps to a test.
 
 ## Layout

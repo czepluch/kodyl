@@ -103,7 +103,12 @@ interface KodylAbi {
     function registeredCount(uint256 eid) external view returns (uint256);
     function checkedInCount(uint256 eid) external view returns (uint256);
     function claimedCount(uint256 eid) external view returns (uint256);
+    /// @dev The event's live pot: unclaimed obligations plus accrued dust,
+    ///      until the dust sweep empties it.
     function held(uint256 eid) external view returns (uint256);
+    /// @dev A live projection until the event is Settled: late check-ins
+    ///      during Dispute change it (each one converts a no-show forfeiture
+    ///      into a claimant). Final only at state Settled.
     function rewardPerAttendee(uint256 eid) external view returns (uint256);
     function MAX_BATCH_SIZE() external view returns (uint256);
     function DUST_CLAIM_TIMEOUT() external view returns (uint256);

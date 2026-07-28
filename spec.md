@@ -6,85 +6,91 @@
 
 Kodyl is a decentralized event management protocol where attendees stake a small deposit when signing up for an event. Show up and get your deposit back (plus a share of no-show deposits). Don't show up without canceling? You lose your stake.
 
-This is a reimplementation/evolution of [Kickback](https://kickback.events/), designed as an educational open-source public good.
+This is a reimplementation/evolution of [Kickback](https://kickback.events/), designed as an educational open-source public good. This document is the language-agnostic protocol reference: the rules and the rationale. The implementation lives in `core/` (Core Solidity); `core/README.md` covers the implementation design and its deviations, and `core/COVERAGE.md` maps every mechanic and invariant here to a test.
 
 ## Core Mechanics
 
 ### Happy Path
 
-1. **Organizer creates event** - Sets deposit amount, cancellation deadline, event time, capacity
-2. **Attendees register** - Stake the required deposit
+1. **Organizer creates event** - Sets deposit amount, cancellation deadline, event time, capacity; receives the new event's id
+2. **Attendees register** - Stake the required deposit (exact amount)
 3. **Event happens** - Attendees check in (verified by organizer)
 4. **Settlement** - Attendees claim deposits + pro-rata share of no-show deposits
 
 ### Cancellation
 
-- Attendees can cancel and get their deposit back **immediately** up until the cancellation deadline
-- Cancellation deadline is configurable per event (minimum: 2 hours before event)
-- After deadline: no refund unless event is cancelled by organizer
-- Re-registration after cancellation is allowed (requires new deposit)
+- Attendees can cancel and get their deposit back **immediately** up until the cancellation deadline (deadline timestamp inclusive)
+- Cancellation deadline is configurable per event (minimum: 2 hours before event start)
+- After the deadline: no refund unless the event is cancelled by the organizer
+- Registration stays open after the deadline (until event start) - registering in that window means no self-service exit
+- Re-registration after cancellation is allowed (requires a new deposit)
 
 ### No-Shows
 
 - Attendees who neither cancel nor check in forfeit their deposit
 - Forfeited deposits are distributed pro-rata among checked-in attendees
-- If nobody checks in, all forfeited deposits go to dust (claimable by project maintainer)
+- If nobody checks in, the entire pot becomes dust (claimable for the project maintainer) as soon as the event settles
 
 ### Event Cancellation
 
-- Organizer can cancel the entire event, triggering full refunds for all registered attendees
-- Event cancellation only allowed **before event starts** (`block.timestamp < eventStart`)
-- After event starts, organizer cannot cancel (only individual claims after dispute period)
+- Organizer can cancel the entire event, entitling every registered attendee to a full refund (`claimRefund`, pull-based)
+- Event cancellation only allowed **before the event starts** (`block.timestamp < eventStart`)
+- After the event starts, the organizer cannot cancel (only individual claims after the dispute period)
+- Refunds on a cancelled event **never expire** (see Settlement)
 
 ## Architecture
 
-### Contract Structure
+### Singleton
 
-**Factory Pattern** - One contract per event for isolation and simplicity.
+**One contract holds every event.** An event is a record stored behind a sequential 1-based id; creating an event is a state write that returns the id, not a contract deployment.
 
 ```
-KodylFactory
-├── Creates KodylEvent instances
-├── Tracks deployed events
-├── Stores project maintainer address (for dust claims)
-└── Holds reference implementation version
-
-KodylEvent (one per event)
-├── Handles registrations
-├── Manages check-ins
-├── Processes cancellations
-└── Distributes deposits at settlement
+Kodyl (singleton)
+├── createEvent(...) -> eventId      // state write, sequential ids from 1
+├── Per-event records: parameters, cancelled flag, attendee statuses, tallies
+├── Per-event pot (held) + global ledger (totalHeld)
+└── Maintainer address (dust recipient, rotatable)
 ```
 
-**Rationale:**
-- Bug isolation - issues in one event don't affect others
-- Simpler state management - no complex nested mappings
-- Clear upgrade path - new events use new template, old events unaffected
-- Gas efficiency - smaller contract state to read/write
+The concept started from the classic factory shape - one deployed contract per event - whose appeal is isolation: a per-event contract cannot confuse its funds or state with another event's, and its balance is its pot. The singleton keeps those properties by construction instead of by deployment: every piece of state is typed and keyed by the event id (statuses, tallies, flags), and fund isolation is explicit ledger accounting rather than separate balances. What the singleton buys: creating an event costs a state write instead of a deployment, and there is a single address to index, read, and reason about.
+
+**Shared custody is the central trade.** All deposits live in one contract balance. The accounting that earns back per-event isolation:
+
+- `held[eid]` - the per-event pot: deposits in; refunds, payouts, and dust out
+- `totalHeld` - the global ledger: the sum of all pots
+- After every ETH movement the contract asserts `address(this).balance >= totalHeld`
+
+The direction is `>=`, not `==`: forced ETH (selfdestruct, block-reward payments) can raise the balance without executing any code and **cannot be rejected**, so strict equality would let 1 wei of forced ETH permanently brick every flow of every event. Forced surplus is simply unowned and stuck; the ledger ignores it.
 
 ### Roles
 
-**Organizer** (per-event admin)
-- Creates event with parameters
+**Organizer** (per-event, permissionless)
+- Whoever calls `createEvent` is the organizer of that event - there is no global admin
 - Checks in attendees (single or batch)
-- Can cancel event before it starts (full refunds to all)
-- Can approve late check-ins during dispute period
+- Can cancel the event before it starts (entitles all registered attendees to refunds)
+- Can approve late check-ins during the dispute period
+- Can update the event's metadata URI at any time
 
 **Attendee**
-- Registers with deposit
-- Can cancel before deadline (immediate refund)
-- Can re-register after cancellation
-- Claims deposit + rewards after dispute period ends
+- Registers with the exact deposit
+- Can cancel through the deadline (immediate refund)
+- Can re-register after cancelling
+- Claims deposit + reward after the dispute period ends, or a refund if the event was cancelled
+
+**Maintainer** (one address, protocol-level)
+- Receives per-event dust and timed-out unclaimed payouts
+- Can hand the role to a new address (`setMaintainer`); no power over event funds, parameters, or check-ins
 
 ## Event Lifecycle
 
 ### Timestamp-Derived State
 
-Instead of storing an explicit state enum, the event state is **derived from timestamps**. This eliminates state transition bugs and reduces storage.
+Instead of storing an explicit state enum, an event's state is **derived from timestamps** (plus the cancelled flag). This eliminates state transition bugs and reduces storage.
 
 ```solidity
-function getState() public view returns (State) {
-    if (cancelled) return State.Cancelled;
+function getState(uint256 eid) public view returns (State) {
+    // eventStart / eventEnd / disputePeriod are fields of event eid
+    if (cancelled[eid]) return State.Cancelled;
     if (block.timestamp < eventStart) return State.Registration;
     if (block.timestamp <= eventEnd) return State.Active;
     if (block.timestamp <= eventEnd + disputePeriod) return State.Dispute;
@@ -92,113 +98,145 @@ function getState() public view returns (State) {
 }
 ```
 
+Boundary semantics are exact and tested at every edge:
+
+- `Registration` ends the instant the event starts: at `t == eventStart` the state is already `Active`
+- `Active` includes both endpoints: `eventStart <= t <= eventEnd`
+- `Dispute` includes its back edge: at exactly `eventEnd + disputePeriod` the state is still `Dispute` (claims still revert); `Settled` begins one second later
+- The cancellation deadline is inclusive: `cancel` works at exactly `t == cancellationDeadline`
+- The dust timeout is exclusive: the sweep opens strictly after `eventEnd + disputePeriod + 30 days`
+
 ### States and Allowed Actions
 
 | State | Condition | Actions Allowed |
 |-------|-----------|-----------------|
-| `Registration` | `now < eventStart` | Register, cancel (before deadline), organizer cancel event |
-| `Active` | `eventStart <= now <= eventEnd` | Check-ins |
-| `Dispute` | `eventEnd < now <= eventEnd + disputePeriod` | Late check-ins by organizer |
-| `Settled` | `now > eventEnd + disputePeriod` | Claims, dust withdrawal |
-| `Cancelled` | `cancelled == true` | Refund claims only |
+| `Registration` | `now < eventStart` | Register, cancel (through the deadline), organizer cancel event, set metadata URI |
+| `Active` | `eventStart <= now <= eventEnd` | Check-ins (single/batch), set metadata URI |
+| `Dispute` | `eventEnd < now <= eventEnd + disputePeriod` | Late check-ins by organizer, set metadata URI |
+| `Settled` | `now > eventEnd + disputePeriod` | Claims (until swept - late claims revert `PayoutSwept`), dust withdrawal, set metadata URI |
+| `Cancelled` | `cancelled == true` | Refund claims (forever), attendee cancel (through the deadline), set metadata URI |
+
+Notes on the two rows that are easy to get wrong:
+
+- `setMetadataURI` is organizer-only and deliberately state-independent: metadata stays correctable in **every** state, including `Settled` and `Cancelled`.
+- On a cancelled event, an attendee's own `cancel` still works until the cancellation deadline - it does not check the cancelled flag. It is funds-safe (same refund as `claimRefund`) but emits `RegistrationCancelled` rather than `RefundClaimed`. This is deliberate: the deadline window is exactly when self-service cancel is a promised right, and cancellation of the event should not revoke it. After the deadline, `claimRefund` is the (permanent) path. Cancelling an already-cancelled event reverts.
 
 ### Capacity
 
-Registration closes automatically when `registeredCount == maxAttendees` (if `maxAttendees > 0`). No explicit "close registration" action needed.
+Registration closes automatically when `registeredCount == maxAttendees` (if `maxAttendees > 0`; 0 means unlimited). A cancellation frees the slot. No explicit "close registration" action needed.
 
 ## Data Model
 
-### Event Parameters (set at creation)
+### Event Record (set at creation, immutable)
 
-| Field | Type | Mutable | Notes |
-|-------|------|---------|-------|
-| `organizer` | `address` | No | Event creator, has admin rights |
-| `depositAmount` | `uint256` | No | Required stake in wei |
-| `cancellationDeadline` | `uint256` | No | Timestamp, min 2h before event |
-| `eventStart` | `uint256` | No | Event start timestamp |
-| `eventEnd` | `uint256` | No | Event end timestamp |
-| `disputePeriod` | `uint256` | No | Duration after event end (default 24h) |
-| `maxAttendees` | `uint256` | No | Capacity cap (0 = unlimited) |
-| `metadataURI` | `string` | Yes | IPFS hash or URL (emits event on change) |
-| `cancelled` | `bool` | Once | Set true by organizer cancel |
+| Field | Type | Notes |
+|-------|------|-------|
+| `organizer` | `address` | Event creator, has per-event admin rights |
+| `depositAmount` | `uint256` | Required stake in wei |
+| `cancellationDeadline` | `uint256` | Timestamp, min 2h before event start |
+| `eventStart` | `uint256` | Event start timestamp |
+| `eventEnd` | `uint256` | Event end timestamp |
+| `disputePeriod` | `uint256` | Duration after event end, bounded 1 hour to 30 days |
+| `maxAttendees` | `uint256` | Capacity cap (0 = unlimited) |
+
+Alongside the record, per event:
+
+| Field | Mutable | Notes |
+|-------|---------|-------|
+| `metadataURI` | Yes | IPFS hash or URL; organizer can change in any state, emits an event |
+| `cancelled` | Once | Set true by organizer cancel, never unset |
+
+Creation validates: `depositAmount > 0`; `eventStart` in the future; `eventEnd > eventStart`; `cancellationDeadline + 2 hours <= eventStart` and the deadline in the future; `disputePeriod` within `[1 hour, 30 days]` (a zero window would strand late-but-present attendees; an unbounded one would lock funds for years).
 
 ### Attendee Status
 
-Use an enum to prevent invalid state transitions:
+An enum per (event, attendee) prevents invalid transitions:
 
 ```solidity
 enum AttendeeStatus {
     None,       // Never registered
     Registered, // Deposited, not yet checked in
-    Cancelled,  // Cancelled before deadline, got refund
+    Cancelled,  // Cancelled or refunded, deposit returned
     CheckedIn,  // Verified attendance
     Claimed     // Already claimed payout
 }
-
-mapping(address => AttendeeStatus) public attendees;
 ```
 
 **Valid transitions:**
-- `None → Registered` (register)
-- `Registered → Cancelled` (cancel before deadline)
-- `Registered → CheckedIn` (organizer check-in)
-- `Cancelled → Registered` (re-register with new deposit)
-- `CheckedIn → Claimed` (claim payout)
+- `None → Registered` (register, Registration state only)
+- `Registered → Cancelled` (cancel through the deadline, or claimRefund on a cancelled event)
+- `Registered → CheckedIn` (organizer check-in, Active or Dispute)
+- `Cancelled → Registered` (re-register with a new deposit; only while the state is Registration, so impossible once the event has started or been cancelled)
+- `CheckedIn → Claimed` (claim at Settled, if the pot has not been swept)
 
 **Invalid transitions (revert):**
-- `Claimed → anything` (no re-registration after claiming)
+- `Claimed → anything` (terminal - no re-registration after claiming)
 - `CheckedIn → Cancelled` (can't cancel after check-in)
+- `CheckedIn → Registered` (can't re-register after check-in)
+- `Registered → Registered` (already registered)
 
-### Counters
+### Counters (per event)
 
 | Counter | Updated By |
 |---------|------------|
-| `registeredCount` | +1 on register, -1 on cancel |
+| `registeredCount` | +1 on register, -1 on cancel and on claimRefund |
 | `checkedInCount` | +1 on check-in |
 | `claimedCount` | +1 on claim |
+| `held` | + deposits, - refunds/payouts/dust (the per-event pot) |
 
-Note: `registeredCount` tracks *current* registered attendees (not historical). Cancelled attendees are subtracted.
+Note: `registeredCount` tracks *current* registrations (not historical). Cancelled and refunded attendees are subtracted.
 
 ### Computed at Settlement
 
 | Value | Calculation |
 |-------|-------------|
-| No-shows | `registeredCount - checkedInCount` (at settlement time) |
+| No-shows | `registeredCount - checkedInCount` |
 | Total forfeited | `noShowCount * depositAmount` |
-| Reward per attendee | `checkedInCount > 0 ? totalForfeited / checkedInCount : 0` |
+| Reward per attendee | `checkedInCount > 0 ? totalForfeited / checkedInCount : 0` (floor division) |
 | Attendee payout | `depositAmount + rewardPerAttendee` |
-| Dust | `totalForfeited % checkedInCount` |
+| Dust | Whatever remains in the event's pot after all claims (`totalForfeited % checkedInCount` when everyone claims) |
+
+Both counts are frozen once the event settles (no registration, cancellation, or check-in can occur), so every claimer receives the same payout. During Dispute, each late check-in moves the projected reward (fewer no-shows, more claimants) - the number is not final until Settled.
+
+### Read Surface
+
+Two deliberate tiers:
+
+- **Record-backed getters** - `getEvent` (all 7 parameters), `organizer`, `getState`, `metadataURI`, `rewardPerAttendee` - revert `EventNotFound` for an unknown id: they answer questions that are meaningless without an event.
+- **Mapping-backed getters** - `attendees` (status), `cancelled`, `registeredCount`, `checkedInCount`, `claimedCount`, `held` - return zero for an unknown id, mirroring Solidity public-mapping semantics.
+
+Global reads: `eventCount`, `totalHeld`, `maintainer`, and the protocol constants (`MAX_BATCH_SIZE`, `DUST_CLAIM_TIMEOUT`, `MIN_CANCELLATION_BUFFER`).
 
 ## Check-in
 
 ### Methods
 
-Two methods for organizer check-in:
+Two methods for organizer check-in, both taking the event id:
 
-1. **Single check-in** - `checkIn(address attendee)`: Check in one attendee
-2. **Batch check-in** - `checkInBatch(address[] calldata attendees)`: Check in multiple attendees
+1. **Single check-in** - `checkIn(uint256 eid, address attendee)`
+2. **Batch check-in** - `checkInBatch(uint256 eid, address[] calldata attendees)`
 
 ### Batch Check-in Constraints
 
-- Maximum 100 attendees per batch (prevents gas limit issues)
-- Skips invalid attendees (not registered, already checked in) without reverting
-- Emits individual `CheckedIn` event per attendee for indexing
+- Maximum 100 attendees per batch; larger arrays revert `BatchTooLarge` (prevents gas limit issues)
+- Skips invalid entries (not registered, already checked in, cancelled) without reverting - the batch is best-effort
+- An address word with dirty upper bits reverts (strict ABI decoding, matching the single check-in path) instead of silently no-oping into an unset key
+- Emits an individual `CheckedIn` event per newly checked-in attendee for indexing
 
 ```solidity
-uint256 public constant MAX_BATCH_SIZE = 100;
-error BatchTooLarge(uint256 size, uint256 max);
-
-function checkInBatch(address[] calldata attendees) external onlyOrganizer {
+function checkInBatch(uint256 eid, address[] calldata attendees) external onlyOrganizer(eid) {
     if (attendees.length > MAX_BATCH_SIZE) revert BatchTooLarge(attendees.length, MAX_BATCH_SIZE);
     for (uint256 i = 0; i < attendees.length; ++i) {
-        _checkIn(attendees[i]); // skips if not registered or already checked in
+        _checkIn(eid, attendees[i]); // skips anyone not currently Registered
     }
 }
 ```
 
 ### Check-in Window
 
-Check-ins are valid from `eventStart` through `eventEnd + disputePeriod`. This allows organizers to approve late check-ins for attendees who were present but missed the check-in window.
+Check-ins are valid from `eventStart` through `eventEnd + disputePeriod` (both edges inclusive) - the `Active` and `Dispute` states. This lets organizers approve late check-ins for attendees who were present but missed the initial window; every late check-in shifts the projected reward until settlement.
+
+The gate is the derived state, not a raw time window: a cancelled event is never in `Active` or `Dispute`, so **check-ins on a cancelled event always revert**. (Otherwise an attendee could be flipped to `CheckedIn` after cancellation and lose the refund path.)
 
 ## Settlement
 
@@ -207,67 +245,83 @@ Check-ins are valid from `eventStart` through `eventEnd + disputePeriod`. This a
 Attendees claim their own payout after the dispute period ends:
 
 ```solidity
-function claim() external {
-    require(getState() == State.Settled, "Not settled");
-    require(attendees[msg.sender] == AttendeeStatus.CheckedIn, "Not eligible");
-    
-    attendees[msg.sender] = AttendeeStatus.Claimed;
-    claimedCount++;
-    
-    uint256 payout = depositAmount + rewardPerAttendee();
-    payable(msg.sender).transfer(payout);
+function claim(uint256 eid) external {
+    require(getState(eid) == State.Settled, NotSettled());
+    require(status[eid][msg.sender] == AttendeeStatus.CheckedIn, InvalidAttendeeStatus());
+
+    uint256 payout = depositAmount + rewardPerAttendee(eid);
+    require(payout <= held[eid], PayoutSwept()); // pot already swept after the timeout
+
+    status[eid][msg.sender] = AttendeeStatus.Claimed;
+    claimedCount[eid]++;
+    held[eid] -= payout;
+    totalHeld -= payout;
+
+    send(msg.sender, payout);
+    assert(address(this).balance >= totalHeld);
 }
 ```
 
 **Why pull-only (no `settleAll()`):**
-- Gas-safe: no risk of hitting block gas limit with large attendee lists
+- Gas-safe: no risk of hitting the block gas limit with large attendee lists
 - Simpler: no pagination logic needed
 - Fair: each attendee pays their own gas
 
 ### Dust Handling
 
-Due to integer division, some wei may remain after all claims. Example:
+Due to floor division, some wei may remain after all claims. Example:
 - 3 attendees checked in
 - 10 wei forfeited from no-shows
 - Each gets 3 wei reward (10 / 3 = 3)
 - 1 wei dust remains (10 % 3 = 1)
 
-`claimDust()` can be called by anyone after all eligible attendees have claimed (or after a timeout). Dust is sent to the project maintainer address stored in the factory.
+`claimDust(eid)` can be called by anyone once the event is settled and either every checked-in attendee has claimed or a 30-day timeout has passed. Dust is **the event's own pot** - exact per-event accounting, never a reading of the shared contract balance - and goes to the project maintainer.
 
 ```solidity
-function claimDust() external {
-    require(getState() == State.Settled, "Not settled");
-    require(claimedCount == checkedInCount || block.timestamp > eventEnd + disputePeriod + 30 days, "Claims pending");
-    
-    uint256 dust = address(this).balance;
-    payable(factory.maintainer()).transfer(dust);
+function claimDust(uint256 eid) external {
+    require(getState(eid) == State.Settled, NotSettled());
+    require(claimedCount[eid] == checkedInCount[eid]
+         || block.timestamp > eventEnd + disputePeriod + 30 days, DustNotClaimable());
+
+    uint256 dust = held[eid];              // the per-event pot
+    require(dust != 0, DustNotClaimable());
+    held[eid] = 0;
+    totalHeld -= dust;
+    send(maintainer, dust);
 }
 ```
+
+**The timeout sweep takes unclaimed payouts too.** After the 30-day timeout the whole remaining pot - rounding dust *and* the payouts of checked-in attendees who never claimed - goes to the maintainer. A checked-in attendee who shows up later is told plainly: `claim` reverts `PayoutSwept()` (rather than underflowing into an opaque panic). Claim within 30 days of settlement or forfeit to the maintainer - that is the protocol's abandonment rule.
 
 ### Zero Check-ins Edge Case
 
 If nobody checks in (`checkedInCount == 0`):
-- `rewardPerAttendee` would divide by zero
-- All forfeited deposits become dust
-- `claimDust()` sends everything to project maintainer
+- `rewardPerAttendee` is defined as 0 (no division by zero)
+- There are no claimants, so the entire pot is dust
+- `claimDust` is available **immediately at Settled**: "all claimed" is vacuously true (0 == 0)
+
+### Cancelled Events: No Sweep
+
+Cancelled events have **no dust path and no timeout**: `claimDust` requires the `Settled` state, which a cancelled event never reaches, and `claimRefund` works forever. This is deliberate. A cancelled pot is exactly the sum of attributed deposits - there is no rounding dust and no forfeiture to abandon - so a sweep would convert funds that are today fail-safe (locked at worst, stealable by no one) into a maintainer seizure surface. Refunds never expire.
 
 ## Invariants
 
-These MUST hold true at all times - test with fuzzing:
+These MUST hold at all times - test with fuzzing:
 
-1. **Deposit accounting**: Contract balance equals expected deposits plus dust
-   - `address(this).balance == registeredCount * depositAmount + dust`
-   - Note: Use `receive() external payable { revert(); }` to reject random ETH sends
+1. **Deposit accounting**: The contract balance always covers the deposit ledger
+   - In-contract: `address(this).balance >= totalHeld`, asserted after every ETH movement, where `totalHeld` is the sum of all per-event pots
+   - The direction is `>=`, not `==`: forced ETH (selfdestruct, block rewards) cannot be rejected, and strict equality would let 1 wei of forced ETH brick every flow
+   - The test harness proves the tight form `balance == totalHeld + forcedETH` under a fuzzed forced-ETH regime
 
 2. **No double claims**: `Claimed` status is terminal (no transitions out)
 
-3. **No post-deadline cancellation**: Cancel reverts if `block.timestamp > cancellationDeadline`
+3. **No post-deadline cancellation**: `cancel(eid)` reverts if `block.timestamp > cancellationDeadline`
 
-4. **Claims only after dispute period**: `claim()` reverts unless `getState() == Settled`
+4. **Claims only after dispute period**: `claim(eid)` reverts unless `getState(eid) == Settled`
 
-5. **Check-in window enforced**: Check-ins revert outside `eventStart` to `eventEnd + disputePeriod`
+5. **Check-in window enforced**: Check-ins revert unless the derived state is `Active` or `Dispute` (from `eventStart` through `eventEnd + disputePeriod`; never on a cancelled event)
 
-6. **Event cancellation window**: `cancelEvent()` reverts if `block.timestamp >= eventStart`
+6. **Event cancellation window**: `cancelEvent(eid)` reverts if `block.timestamp >= eventStart` (and on an already-cancelled event)
 
 ## Security Considerations
 
@@ -277,50 +331,62 @@ All state-changing functions follow:
 - **F**unction requirements (validate inputs, check state)
 - **E**ffects (update state)
 - **I**nteractions (external calls last - CEI)
-- **P**rotocol **I**nvariants (verify at end)
+- **P**rotocol **I**nvariants (assert `balance >= totalHeld` after every ETH movement)
+
+No reentrancy guard: status transitions are terminal and flip before any send (CEI), which the adversarial suite attacks directly (reentrant claim, claimDust, cross-event cancel).
 
 ### ETH Handling
 
-- Reject unexpected ETH: `receive() external payable { revert(); }`
-- All ETH transfers use CEI pattern
-- Consider ReentrancyGuard on `claim()` and `cancel()`
+- Plain ETH transfers (empty calldata) and unknown selectors are rejected by the fallback
+- Forced ETH (selfdestruct, block rewards) cannot be rejected by any contract; the `>=` ledger direction absorbs it - the surplus is unowned and stuck, and no flow is affected
+- All ETH transfers use the CEI pattern; payouts, refunds, and dust are debited from the per-event pot and the global ledger before sending
 
 ### Trust Assumptions
 
-- Organizer is trusted to honestly verify attendance
-- Organizer cannot steal deposits (can only approve check-ins or cancel event)
-- Organizer cannot modify deposit amount after event creation
-- Organizer cannot cancel event after it starts
+**Check-in authority is custody.** The organizer decides who checked in, and check-in status is what money follows - so attendees trust the organizer with their stake, not merely with attendance bookkeeping:
+
+- **An organizer can capture honest deposits.** Register a sybil, check in only the sybil: with 10 honest attendees at 1 ETH each, the sybil claims 11 ETH at settlement (its own deposit plus all 10 forfeitures). No protocol rule prevents this.
+- **An organizer who checks in nobody routes every deposit to the maintainer** - the whole pot is dust immediately at Settled with zero check-ins, or after the 30-day sweep otherwise.
+- Mitigations are economic and reputational only: an organizer who does this burns their ability to run future events. A future organizer-stake mechanism could add a slashing cost.
+
+What the organizer *cannot* do: change any event parameter after creation, take custody directly (no payout path pays the organizer as such), cancel after the event starts, block a pre-deadline cancel, or block refunds on a cancelled event.
+
+**Maintainer liveness.** The maintainer is assumed to accept plain ETH. A maintainer contract that reverts on receipt blocks only dust egress - `claim`, `cancel`, and `claimRefund` pay the caller and are unaffected - and the situation is self-healing via `setMaintainer`. (Validation failures in `setMaintainer` and construction reuse the `InvalidEventParameters(string)` error shape - a deliberate wire-compatibility choice, see `core/README.md`.)
 
 ### Attack Vectors
 
-| Attack | Mitigation |
-|--------|------------|
-| Organizer marks fake attendees | Economic: reputation at stake. Future: require organizer stake |
+| Attack | Outcome / Mitigation |
+|--------|----------------------|
+| Organizer sybil check-in (register a sock puppet, check in only it) | **Not prevented** - the sybil claims the whole pot. Economic/reputational deterrence only; future: organizer stake |
+| Organizer checks in nobody | **Not prevented** - all deposits become maintainer dust (immediately at Settled, or via the 30-day sweep). Same trust surface |
 | Front-running check-ins | Not profitable - check-in doesn't transfer value |
-| Reentrancy on claim | CEI pattern + ReentrancyGuard |
-| Griefing via spam registrations | Deposit itself is spam protection |
-| Random ETH sent to contract | Rejected by `receive()`, keeps accounting clean |
+| Reentrancy on claim/refund/dust | CEI + terminal status transitions; attacked directly in the accounting suite |
+| Griefing via spam registrations | The deposit itself is the spam cost |
+| Plain ETH sent to contract | Rejected by the fallback |
+| Forced ETH (selfdestruct, block rewards) | Cannot be rejected; absorbed by the `>=` ledger direction, no flow affected |
+| Maintainer that reverts on receive | Blocks only dust egress; recoverable via `setMaintainer` |
 
 ## MVP Scope
 
 ### In Scope
 
-- [x] Factory contract for deploying events
-- [x] Event contract with timestamp-derived lifecycle
-- [x] ETH deposits (native currency)
+- [x] Singleton contract: every event a record behind a sequential 1-based id, creation a state write
+- [x] Timestamp-derived lifecycle (no stored state enum)
+- [x] ETH deposits (native currency), exact-amount registration
 - [x] Attendee status enum (None/Registered/Cancelled/CheckedIn/Claimed)
-- [x] Registration with capacity limit
-- [x] Cancellation with immediate refund (before deadline)
+- [x] Registration with capacity limit (0 = unlimited, cancellation frees the slot)
+- [x] Cancellation with immediate refund (deadline-inclusive)
 - [x] Re-registration after cancellation
-- [x] Manual check-in by organizer only (single and batch, max 100)
+- [x] Manual check-in by organizer only (single and batch, max 100 per batch)
 - [x] Pro-rata distribution of no-show deposits
-- [x] Dispute period for late check-in approval
-- [x] Event cancellation with full refunds (before event starts only)
+- [x] Dispute period for late check-in approval (bounded 1 hour to 30 days)
+- [x] Event cancellation with full refunds (before start only; refunds never expire)
 - [x] Pull-only claims (no `settleAll()`)
-- [x] `claimDust()` to project maintainer
-- [x] IPFS metadata URI (mutable, emits event on change)
-- [x] Reject random ETH sends
+- [x] Per-event dust to the project maintainer; 30-day timeout sweep with `PayoutSwept` for late claims
+- [x] Rotatable maintainer (`setMaintainer`)
+- [x] Metadata URI mutable in every state (emits event on change)
+- [x] Plain ETH sends rejected via the fallback; forced ETH absorbed by the ledger
+- [x] Per-chain deployment records (`deployments/`)
 
 ### Out of Scope (Future Enhancements)
 
@@ -337,88 +403,41 @@ All state-changing functions follow:
 - [ ] Reputation/history tracking across events
 - [ ] POAP integration (auto-distribute POAPs to checked-in attendees via POAP API)
 - [ ] Multi-sig organizer support
+- [ ] Organizer stake (slashing cost for the sybil check-in surface above)
 
 ---
 
-## Frontend Requirements
+## Frontend
 
-> Note: Frontend is a separate repository. This section defines the interface requirements.
+The frontend lives in this repo (`frontend/`): a React + viem demo dApp structured around the roles the contract actually has (see `frontend/README.md` and `frontend/ROLES-PLAN.md`).
 
-### Core Views
+What exists:
 
-**Event Discovery**
-- List of upcoming events
-- Filter by date, location (from metadata), deposit amount
-- Search by name/description
+- **Role lenses, not an admin panel**: Discover (browse and register), My tickets (your events grouped by what needs doing), Organize (create and manage your events - organizer controls appear contextually), and a full Event page with an attendee roster reconstructed from event logs
+- **State communication**: derived-state labels, countdowns to the next lifecycle boundary, and explicit dispute messaging ("claims open at settlement: the organizer can still approve late check-ins")
+- **Identity toggle**: demo accounts (impersonated anvil keys, best for talks) or a real injected wallet; all demo affordances - account picker, chain-clock fast-forward, demo drawer - are chain-gated to local anvil and disappear on real networks
+- **Structured metadata** encoded into on-chain `data:` URIs behind a single resolver seam that also understands `http(s)` and `ipfs://`
 
-**Event Detail**
-- Event metadata (name, description, location, time)
-- Deposit amount and current attendee count
-- Registration status and actions
-- Countdown to cancellation deadline
-- Clear state indication (Registration / Active / Dispute / Settled)
-- **Future**: Gated content visible only to registered attendees
-
-**Organizer Dashboard**
-- Create new event form
-- Attendee list with check-in controls
-- Bulk check-in option (up to 100 at a time)
-- Event cancellation (only shown before event starts)
-
-**Attendee Dashboard**
-- My registered events
-- Claim available rewards
-- Registration/cancellation history
-
-### State Communication
-
-The frontend must clearly communicate:
-- Current event state and what actions are available
-- Why claims aren't available during dispute period ("Organizer can still approve late check-ins")
-- Countdown timers for deadline and dispute period end
-
-### Wallet Integration
-
-- Support major wallets (MetaMask, WalletConnect, Coinbase Wallet)
-- Clear transaction previews before signing
-- Handle network switching (Sepolia for testing, mainnet/L2s for production)
+Still aspirational (tracked in `frontend/ROLES-PLAN.md`): an edit-metadata UI, a `setMaintainer` control, real IPFS metadata hosting, search/filters, share links, calendar export, and an indexer if log-scanning gets slow.
 
 ---
 
 ## Testing Strategy
 
-### Unit Tests
+The suite drives the compiled bytecode through a typed interface in forge and asserts selectors, event topics, and revert payloads byte-for-byte:
 
-- All state transitions via timestamp manipulation
-- Access control on all functions
-- Edge cases:
-  - Exactly at deadlines (boundary conditions)
-  - Capacity limits (register at max, one over)
-  - Zero attendees, zero check-ins
-  - Re-registration after cancellation
+- **Unit and boundary tests** - every mechanic, every state edge (deadline inclusive, dispute back edge, batch max), access control, capacity, re-registration
+- **Adversarial batch-decoder tests** - the `checkInBatch` calldata path attacked with malformed byte strings (truncated words, wild offsets, dirty address bits)
+- **Phase-aware invariant fuzzing** - 128k-call campaigns across concurrent events with a forced-ETH regime and an independent ghost model asserting payout exactness per claim
+- **Conservation and reentrancy suites** - indivisible-amount splits, three-way ledger equality, reentrant claim/dust/cancel attacks
+- **Toolchain canaries** - minimal tests pinning the language behaviors the implementation leans on
 
-### Invariant Tests
-
-Fuzz testing to verify invariants hold under random sequences of:
-- Registrations
-- Cancellations  
-- Re-registrations
-- Check-ins (single and batch)
-- Claims
-- Time warps
-
-### Integration Tests
-
-- Full event lifecycle happy path
-- Event cancellation scenarios
-- Dispute period resolution
-- Dust claiming (all claimed vs timeout)
-- Zero check-in edge case
+`core/COVERAGE.md` is the map: every mechanic, transition, and invariant in this document, with the tests that verify it.
 
 ### Deployment
 
-- Sepolia testnet for development and testing
-- Document deployment addresses and verification
+- Public testnet (Sepolia) via guarded scripts; committed per-chain records in `deployments/` (see `VERIFICATION.md` for third-party verification)
+- Local anvil for development and the demo frontend
 
 ---
 

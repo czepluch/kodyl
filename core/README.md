@@ -4,8 +4,8 @@ The Kodyl concept - stake a deposit to register for an event, checked-in
 attendees reclaim it plus a pro-rata share of no-show forfeitures, dust goes
 to a maintainer (see `spec.md`) - implemented natively in
 [Core Solidity](https://github.com/argotorg/solcore), designed around what
-the language does well today rather than mirroring the classic Solidity
-architecture in `src/`.
+the language does well today rather than mirroring the factory architecture
+classic Solidity would push toward.
 
 ## The design
 
@@ -82,10 +82,14 @@ dispatch, `payable` dispatch, compile-time-folded `keccakLit`, for-loops, and
 the module system.
 
 Shimmed in `kodyl.solc` because the language does not have it yet (each maps
-to a tracked upstream gap):
+to a tracked upstream gap). The list is also a changelog of the language
+closing gaps: it has already shrunk once - the re-pin to solcore `8a77bd3f`
+brought runtime string literals, moving item 4 from fully-shimmed to
+wire-shape-only - so each item carries its status at the pinned rev.
 
 1. **Checked arithmetic** (`addCk`/`subCk`/`mulCk`/`solAssert` reproducing
-   `Panic(0x11)`/`0x01`) - operators wrap today (solcore #484).
+   `Panic(0x11)`/`0x01`) - operators wrap today (solcore #484, still open
+   upstream at the pinned rev).
 2. **Events** - no `emit`; hand-rolled `log1..log3` emitters, generic over
    topics.
 3. **Errors** - no custom-error syntax. An `ErrSel` type with a `Str`
@@ -94,8 +98,9 @@ to a tracked upstream gap):
    `requireK(cond, "X()")`; errors with arguments still get hand-built
    payloads matching `abi.encodeWithSelector` byte-for-byte (`revertWith2`,
    `revertStr`), fed the same signature literals.
-4. **The `Error(string)` wire shape** - string literals materialize at
-   runtime, and every `InvalidEventParameters(string)` reason is now a source
+4. **The `Error(string)` wire shape** (narrowed at the `8a77bd3f` re-pin) -
+   string literals materialize at runtime, and every
+   `InvalidEventParameters(string)` reason is now a source
    literal fed through `revertStr`. What stays shimmed is the wire format:
    native `require(cond, "message")` reverts the raw UTF-8 bytes, not
    Solidity `Error(string)` (pinned by
@@ -113,22 +118,112 @@ to a tracked upstream gap):
 Zero `assembly` blocks anywhere: every opcode used is an imported typed
 function.
 
+## Storage layout
+
+How Core Solidity lays out this contract's storage, derived from the
+committed `build/Kodyl.yul`. Contract fields take consecutive slots in
+declaration order:
+
+| Slot | Field | Type |
+|---:|---|---|
+| 0 | `maintainer` | `address` |
+| 1 | `eventCount` | `uint256` |
+| 2 | `totalHeld` | `uint256` |
+| 3 | `eventsRec` | `mapping(uint256, EventRec)` |
+| 4 | `metadataUris` | `array(string)` (length word) |
+| 5 | `cancelledM` | `mapping(uint256, bool)` |
+| 6 | `statusM` | `mapping(uint256, mapping(address, AttendeeStatus))` |
+| 7 | `countersM` | `mapping(uint256, Counters)` |
+
+A mapping value lives at `keccak256(slot ++ key)` - note the argument order,
+which is **reversed** from classic Solidity's `keccak256(key ++ slot)`.
+Nested mappings iterate the rule: a `statusM` entry sits at
+`keccak256(keccak256(6 ++ eid) ++ attendee)`. Dynamic arrays and strings
+match classic Solidity exactly: array length at slot `p`, element `i` at
+`keccak256(p) + i`, strings in the usual short/long form.
+
+At its hashed base slot, an ADT value lays out per its derived `Generic`
+representation:
+
+- `EventRec` is a two-constructor sum: one tag word (0 = `NoEvent`,
+  1 = `Ev`), then seven payload slots - organizer, depositAmount,
+  cancellationDeadline, eventStart, eventEnd, disputePeriod, maxAttendees -
+  eight slots per event.
+- `Counters` is a single-constructor product: no tag word, four consecutive
+  slots - registered, checkedIn, claimed, held.
+- `AttendeeStatus` has five nullary constructors and its derived
+  representation is a nested binary sum, so the tag is unary across
+  consecutive slots: a read walks 0/1 words and stops at the first 0.
+  `None` = `[0]` (the zero-slot rule), `Registered` = `[1,0]`,
+  `Cancelled` = `[1,1,0]`, `CheckedIn` = `[1,1,1,0]`,
+  `Claimed` = `[1,1,1,1]`. (A rewrite to a shorter constructor can leave
+  stale deeper words; they are unreachable - the walk stops first.)
+
+Only the ABI and the events are stable interfaces for indexers. The slots
+above are an implementation detail of the std's derived `CanStore` instances
+and can renumber under refactors - the `Counters` refactor did exactly that.
+
 ## Design deviations from spec.md
 
-- **Shared custody.** spec.md's factory rationale includes per-event fund
-  isolation; the singleton pools custody and compensates with the
-  ledger invariants above. This is the one real security-posture trade of
-  the design.
+- **Shared custody.** The factory shape the concept started from implies
+  per-event fund isolation; the singleton pools custody and compensates with
+  the ledger invariants above. spec.md now names this the central trade; it
+  remains the one real security-posture trade of the design.
 - `EventAlreadyStarted` covers every non-Registration state for
   `cancelEvent` (including already-cancelled), instead of a dedicated error.
 - After `DUST_CLAIM_TIMEOUT`, unclaimed payouts sweep to the maintainer with
-  the dust (spec.md leaves late-claimer behavior after timeout implicit). A
-  checked-in attendee who claims after that sweep is told plainly: `claim`
-  reverts `PayoutSwept()` rather than underflowing into an opaque panic.
-- `disputePeriod` is validated to `[1 hour, 30 days]`. spec.md gives only a
-  default (24h) and no bounds; the range is deliberate defensive validation
-  (a zero window would strand late-but-present attendees, an unbounded one
-  would lock funds for years). Documented rather than removed.
+  the dust. A checked-in attendee who claims after that sweep is told
+  plainly: `claim` reverts `PayoutSwept()` rather than underflowing into an
+  opaque panic. (Once implementation-defined, now specified in spec.md.)
+- `disputePeriod` is validated to `[1 hour, 30 days]` - deliberate defensive
+  validation (a zero window would strand late-but-present attendees, an
+  unbounded one would lock funds for years). Originally a review finding
+  against a spec that gave only a 24h default; the bounds and rationale are
+  now specified in spec.md, so this is history rather than a live deviation.
+- **Cancelled events have no sweep path.** `claimRefund` works forever; there
+  is deliberately no timeout after which the maintainer can take a cancelled
+  event's pot. A cancelled pot is exactly the attributed deposits - no dust,
+  no forfeitures - so a sweep would convert fail-safe funds (locked if never
+  claimed, but unstealable) into a maintainer seizure surface. Refunds never
+  expire.
+- **`cancel` still works on a cancelled event until the deadline.** Attendee
+  `cancel` does not check `cancelledM`: before the cancellation deadline both
+  paths pay the same refund, so the overlap is funds-safe - but it emits
+  `RegistrationCancelled` where `claimRefund` emits `RefundClaimed`.
+  Indexers should treat the two as one deposit-returned family. Deliberate;
+  the demo UI never routes there.
+- **One string-carrying error selector.** Constructor and `setMaintainer`
+  failures reuse the `InvalidEventParameters(string)` selector even though no
+  event parameters are involved - a deliberate wire-compat choice: the ABI
+  carries a single reason-string error shape and every misuse revert decodes
+  through it.
+- **Two-tier read surface.** The ADT-backed getters (`getEvent`, `organizer`,
+  `getState`, `metadataURI`, `rewardPerAttendee`) revert `EventNotFound` for
+  an unknown id; the raw-mapping getters (`attendees`, `cancelled`,
+  `registeredCount`, `checkedInCount`, `claimedCount`, `held`) return zero,
+  mirroring what a Solidity public mapping would do. The split is deliberate
+  and pinned by tests.
+- **The maintainer is assumed to accept ETH.** A maintainer contract that
+  reverts on receipt blocks only dust egress - `claim`, `cancel`, and
+  `claimRefund` pay the caller and never touch the maintainer - and the
+  block self-heals: the maintainer role rotates itself to a working address
+  via `setMaintainer`.
+
+## Trust surface
+
+Check-in authority is custody. The organizer alone can capture every honest
+deposit by registering a sybil and checking in only the sybil: with ten
+honest attendees at 1 ETH each, the sybil claims 11 ETH at Settled - its own
+deposit plus all ten forfeitures. The inverse abuse routes value to the
+maintainer instead: an organizer who checks nobody in turns all deposits
+into dust, claimable immediately at Settled when there are zero check-ins
+and after the 30-day timeout otherwise. Attendees therefore trust the
+organizer with their stake; the mitigations are economic and reputational
+(an organizer who seizes deposits kills their next event), not
+cryptographic. The maintainer is the second trusted role: it receives dust,
+rotates itself via `setMaintainer`, and is assumed to accept ETH (the
+liveness deviation above). Nothing lets the maintainer touch attendee funds
+before the dust gates open.
 
 ## Security review
 
@@ -147,3 +242,16 @@ issues, all fixed and regression-tested:
   refund). Check-in is now gated on the derived state (Active/Dispute), which
   a cancelled event never has (`test_checkIn_rejectedAfterCancelSoRefundStaysOpen`).
 - **disputePeriod bounds (low).** Documented above.
+
+A second, full fresh-eyes round ran before the testnet push: a multi-agent
+review across funds safety, spec conformance, language traps, the test
+suite, and the docs, with every finding adversarially verified before it
+counted. It found no funds-loss bugs. The one contract change it produced:
+`checkInBatch` now rejects address words with dirty upper bits with
+`DirtyHigherBitsForAddress()`, matching the std decoder on the typed
+`checkIn` path (previously a dirty word silently no-oped into an unset
+mapping key). The rest of the round hardened the tests: the lifecycle
+invariant handler became phase-aware (claim/check-in/dust paths now succeed
+hundreds of times per 128k-call campaign instead of single digits), and the
+fuzz runs under a forced-ETH regime asserting the tight ledger form
+`balance == totalHeld + forced ETH`.

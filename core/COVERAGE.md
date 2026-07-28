@@ -43,7 +43,7 @@ against the compiled Core Solidity bytecode (`test/Kodyl.t.sol` unless noted).
 
 | # | Invariant | Verified by |
 |---|---|---|
-| 1 | Deposit accounting: balance == deposits held (+ dust) | In-contract solAssert of balance >= totalHeld after every ETH movement (>= absorbs forced ETH); the harness invariants prove the tight form balance == totalHeld + forcedETH under a fuzzed forced-ETH regime: KodylInvariant.t.sol invariant_ledgersConsistent and KodylConservation.t.sol invariant_ledgerThreeWayEquality (128k calls each, 3 events, per-event and global ledgers) |
+| 1 | Deposit accounting: balance always covers the deposit ledger | In-contract solAssert of balance >= totalHeld after every ETH movement (>= absorbs forced ETH); the harness invariants prove the tight form balance == totalHeld + forcedETH under a fuzzed forced-ETH regime: KodylInvariant.t.sol invariant_ledgersConsistent and KodylConservation.t.sol invariant_ledgerThreeWayEquality (128k calls each, 3 events, per-event and global ledgers) |
 | 2 | No double claims (Claimed terminal) | test_claim_paysDepositPlusReward (second claim reverts InvalidAttendeeStatus(4, 3)), test_claimRefund_afterCancelEvenPastDeadline (double refund reverts InvalidAttendeeStatus(2, 1)) |
 | 3 | No post-deadline cancellation | test_cancel_revertsAfterDeadline |
 | 4 | Claims only after dispute period | test_claim_revertsBeforeSettledAndWhenNotCheckedIn, test_claim_andDustRevertDuringDispute |
