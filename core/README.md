@@ -50,7 +50,7 @@ singleton:
 | `Kodyl.solc` | The whole protocol: one contract, 28 entry points (27 typed public functions plus `checkInBatch` through the payable fallback) |
 | `kodyl.solc` | Shared module (`import lib.kodyl.{*}`): infrastructure the language does not provide yet - checked-math shims, revert/event builders, env wrappers, validation |
 | `Probe.solc` | Toolchain canary: minimal contract proving the pipeline end to end |
-| `build/` | Pipeline output (gitignored) |
+| `build/` | Pipeline output; the deployable `.hex`, generated `.yul`, and `TOOLCHAIN` stamp are committed (so `forge test` works without the toolchain), `.hull`/`.abi` intermediates stay local |
 | `COVERAGE.md` | spec.md mechanics and invariants mapped to tests |
 
 Build and test:

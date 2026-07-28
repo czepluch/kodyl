@@ -1,0 +1,150 @@
+# CI for the Core Solidity showcase.
+#
+# Three verification jobs:
+#   forge-test     - the Foundry harness against the committed core/build
+#                    bytecode, plus the frontend-ABI drift check
+#   frontend       - npm build of the React + viem demo (frontend/** changes)
+#   reproduce-core - rebuilds core/build from source with the pinned solcore
+#                    toolchain and proves the committed artifacts are
+#                    byte-identical (core/scripts changes + manual dispatch)
+#
+# GitHub has no per-job path filters inside a single workflow, so a small
+# `changes` job computes which areas a push/PR touched and the area jobs gate
+# on its outputs.
+#
+# Action refs are pinned to tags (majors verified against upstream releases,
+# 2026-07-28). For supply-chain hardening, prefer pinning every `uses:` to a
+# full commit SHA (tags are movable); resolve each SHA with
+# `gh api repos/<owner>/<repo>/git/ref/tags/<tag>` and keep the tag in a
+# trailing comment.
+
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  changes:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      # paths-filter lists PR files through the API on pull_request events.
+      pull-requests: read
+    outputs:
+      frontend: ${{ steps.filter.outputs.frontend }}
+      core: ${{ steps.filter.outputs.core }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: dorny/paths-filter@v4 # TODO: pin to a commit SHA
+        id: filter
+        # Nothing to compare on manual dispatch: the outputs stay empty and
+        # reproduce-core runs unconditionally there.
+        if: github.event_name != 'workflow_dispatch'
+        with:
+          filters: |
+            frontend:
+              - 'frontend/**'
+            core:
+              - 'core/**'
+              - 'scripts/**'
+              - '.github/workflows/ci.yml'
+
+  forge-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: foundry-rs/foundry-toolchain@v1 # TODO: pin to a commit SHA
+        with:
+          # The forge version the suite is developed against; solc 0.8.33 and
+          # the invariant scale are pinned in foundry.toml either way.
+          version: v1.7.1
+      - name: Run the Foundry suite against the committed core/build bytecode
+        run: forge test -vv
+      - name: Check frontend ABI is in sync with test/KodylAbi.sol
+        run: ./scripts/sync-abi.sh --check
+
+  frontend:
+    needs: changes
+    if: needs.changes.outputs.frontend == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v7 # TODO: pin to a commit SHA
+        with:
+          node-version: lts/*
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - run: npm ci
+        working-directory: frontend
+      - run: npm run build
+        working-directory: frontend
+
+  reproduce-core:
+    needs: changes
+    if: github.event_name == 'workflow_dispatch' || needs.changes.outputs.core == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Read the pinned solcore rev from the build stamp
+        id: stamp
+        run: |
+          rev="$(awk 'NR == 1 && $1 == "solcore_rev" { print $2 }' core/build/TOOLCHAIN)"
+          if [ -z "$rev" ] || [ "$rev" = "unknown" ]; then
+            echo "error: no solcore_rev on line 1 of core/build/TOOLCHAIN" >&2
+            exit 1
+          fi
+          echo "rev=$rev" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout solcore at the pinned rev
+        uses: actions/checkout@v7
+        with:
+          repository: argotorg/solcore
+          ref: ${{ steps.stamp.outputs.rev }}
+          path: solcore
+          persist-credentials: false
+
+      # The first uncached run is SLOW: nix builds GHC plus the sol-core
+      # Haskell closure from the solcore flake. magic-nix-cache stores the
+      # results in the Actions cache so later runs are fast.
+      - uses: DeterminateSystems/nix-installer-action@v22 # TODO: pin to a commit SHA
+      - uses: DeterminateSystems/magic-nix-cache-action@v14 # TODO: pin to a commit SHA
+
+      # pin-toolchain.sh verifies toolchain/solc but does not create it (a
+      # one-time manual step locally). Recreate it here from the same source -
+      # the solc of the nixpkgs rev locked by the solcore flake - and assert
+      # the version, so a lockfile drift surfaces here rather than as an
+      # unexplained hex diff at the end.
+      - name: Pin solc from solcore's locked nixpkgs
+        run: |
+          mkdir -p toolchain
+          nixpkgs_rev="$(jq -r '.nodes.nixpkgs.locked.rev' solcore/flake.lock)"
+          nix build "github:nixos/nixpkgs/${nixpkgs_rev}#solc" --out-link toolchain/solc
+          toolchain/solc/bin/solc --version | grep -F "0.8.28"
+
+      - name: Build the pinned toolchain (sol-core, yule, std snapshot)
+        run: ./scripts/pin-toolchain.sh "$GITHUB_WORKSPACE/solcore"
+
+      - name: Rebuild core/build from source
+        run: ./scripts/check-core.sh
+
+      # The hex/yul artifacts are the reproducibility claim. core/build/
+      # TOOLCHAIN is deliberately NOT diffed: it stamps binary sha256s, and a
+      # CI nix build of a GHC-produced binary is not guaranteed bit-identical
+      # to the local build that stamped it.
+      - name: Verify the committed artifacts are byte-identical
+        run: git diff --exit-code -- core/build/Kodyl.hex core/build/Probe.hex core/build/Kodyl.yul core/build/Probe.yul

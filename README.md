@@ -34,38 +34,80 @@ how every mechanic in [`spec.md`](./spec.md) maps to a test.
 | `core/README.md`, `core/COVERAGE.md` | design + deviations, and the spec-to-test map |
 | `scripts/check-core.sh` | the compile pipeline: `sol-core` -> `yule` -> `solc` -> deployable hex |
 | `scripts/deploy-anvil.sh`, `scripts/seed-anvil.sh` | deploy + seed a local node |
+| `scripts/deploy-testnet.sh`, `scripts/seed-testnet.sh` | deploy + seed a public testnet (env-driven, chain-guarded); records land in `deployments/<chainid>.json` |
+| `scripts/measure.sh` | reproduce the measured gas/size numbers on a scratch node |
+| `deployments/` | committed per-network deployment records (see `deployments/README.md`, `VERIFICATION.md`) |
 | `test/` | a **Foundry harness** (Solidity) that deploys the compiled Core bytecode and drives it - the tests are how the port is verified |
 | `frontend/` | a React + viem demo dApp (see `frontend/README.md`) |
 | `spec.md` | the language-agnostic protocol specification |
 
 ## Toolchain
 
-The contract is compiled by an external pipeline, not `forge`.
-`scripts/pin-toolchain.sh` nix-builds `sol-core`/`yule` from a solcore
-checkout into `toolchain/` (GC-rooted links plus a `std` snapshot at the same
-rev, recorded in `toolchain/SOLCORE_REV`); `scripts/check-core.sh` consumes
-them and stamps each build into `core/build/TOOLCHAIN`. Foundry is present
-purely as a **test harness**: `forge test`
-compiles the `test/` Solidity, which reads `core/build/*.hex` and deploys it.
-(That is why `foundry.toml` sets `src = "test"` - there is no Solidity `src`
-tree.)
+The contract is compiled by an external pipeline, not `forge`. Foundry is
+present purely as a **test harness**: `forge test` compiles the `test/`
+Solidity, which reads `core/build/*.hex` and deploys it. (That is why
+`foundry.toml` sets `src = "test"` - there is no Solidity `src` tree.)
 
 ## Build & test
 
+The deployable artifacts (`core/build/*.hex`, the generated `*.yul`, and the
+`TOOLCHAIN` stamp) are committed, so a fresh clone tests with zero toolchain
+setup:
+
 ```shell
-./scripts/check-core.sh      # compile the Core Solidity contract to bytecode
-forge test                   # deploy that bytecode in forge and verify behaviour
+forge test                   # deploys the committed bytecode in forge and verifies behaviour
 ```
+
+Rebuilding the bytecode itself needs the pinned toolchain:
+
+```shell
+./scripts/pin-toolchain.sh <solcore-checkout>   # one-time; requires nix
+./scripts/check-core.sh                         # .solc -> Yul -> deployable hex
+```
+
+`pin-toolchain.sh` nix-builds `sol-core`/`yule` from a solcore checkout into
+`toolchain/` (GC-rooted links plus a `std` snapshot at the same rev, recorded
+in `toolchain/SOLCORE_REV`); `check-core.sh` consumes them (every path is
+env-overridable: `SOL_CORE`, `YULE`, `SOLC`, `STD`) and stamps each build
+into `core/build/TOOLCHAIN`. CI re-proves on every core change that the
+committed artifacts are byte-identical to a from-source rebuild at the pinned
+rev - see [`VERIFICATION.md`](./VERIFICATION.md) for the third-party recipe.
 
 For the demo dApp against a local anvil node, see [`frontend/README.md`](./frontend/README.md).
 
+## Measured
+
+From `scripts/measure.sh` (a full lifecycle on a scratch anvil node,
+deterministic timestamps, solcore rev `8a77bd3f`):
+
+| Measurement | Value |
+|---|---:|
+| deployed runtime size | 10051 bytes |
+| deploy gas | 2250651 |
+| createEvent | 250306 |
+| register (first attendee) | 141453 |
+| checkIn (single) | 124994 |
+| checkInBatch (10 attendees) | 575467 |
+| claim | 121020 |
+| claimDust | 63949 |
+
+The runtime is 40.9% of the 24576-byte EIP-170 limit. `createEvent` is a state
+write, not a contract deployment - creating an event costs ~250k gas, where
+the factory shape classic Solidity pushes toward would pay deployment gas per
+event. Rerun `scripts/measure.sh` to reproduce the table.
+
 ## Status
 
-Core Solidity is a research language and nowhere near production. This repo is a
-showcase of its current state, not a deployment target. The accounting is
-adversarially tested (reentrancy, indivisible-amount conservation, full-lifecycle
-invariants), but the language, the compiler, and this contract are all young.
+Core Solidity is a research language and nowhere near production. This repo
+is a showcase of its current state with a testnet demo target (Sepolia, via
+`scripts/deploy-testnet.sh` - env-driven signer, chain id asserted, mainnet
+hard-refused); it is not, and should not become, a mainnet deployment. The
+accounting is adversarially tested (reentrancy, indivisible-amount
+conservation, full-lifecycle invariants), but the language, the compiler, and
+this contract are all young. Live deployments are recorded in
+`deployments/<chainid>.json` and verifiable per
+[`VERIFICATION.md`](./VERIFICATION.md).
 
 ## License
 
-MIT (pending).
+MIT.

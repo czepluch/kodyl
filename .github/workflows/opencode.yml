@@ -8,14 +8,21 @@ on:
 
 jobs:
   opencode:
+    # Gate on author_association so only the repo owner or org members can
+    # trigger the bot: anyone can comment on a public issue/PR, and the job
+    # holds a secret.
     if: |
-      contains(github.event.comment.body, ' /oc') ||
-      startsWith(github.event.comment.body, '/oc') ||
-      contains(github.event.comment.body, ' /opencode') ||
-      startsWith(github.event.comment.body, '/opencode')
+      (github.event.comment.author_association == 'OWNER' ||
+       github.event.comment.author_association == 'MEMBER') &&
+      (contains(github.event.comment.body, ' /oc') ||
+       startsWith(github.event.comment.body, '/oc') ||
+       contains(github.event.comment.body, ' /opencode') ||
+       startsWith(github.event.comment.body, '/opencode'))
     runs-on: ubuntu-latest
+    # id-token: write was removed: nothing here documents an OIDC exchange,
+    # and the action is authenticated via OPENCODE_API_KEY. Re-add it only if
+    # the action is switched to OIDC auth.
     permissions:
-      id-token: write
       contents: read
       pull-requests: read
       issues: read
@@ -26,6 +33,8 @@ jobs:
           persist-credentials: false
 
       - name: Run opencode
+        # TODO: pin to a commit SHA instead of the movable @latest tag (this
+        # third-party action runs with access to OPENCODE_API_KEY).
         uses: anomalyco/opencode/github@latest
         env:
           OPENCODE_API_KEY: ${{ secrets.OPENCODE_API_KEY }}

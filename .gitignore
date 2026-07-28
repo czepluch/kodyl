@@ -4,10 +4,6 @@ out/
 
 # Ignores development broadcast logs
 broadcast/
-!/broadcast/31337/
-
-# Docs
-docs/
 
 # Dotenv file
 .env
@@ -19,8 +15,18 @@ coverage/
 # Solc artifacts
 soljson*.js
 
-# Core Solidity pipeline output
-core/build/
+# Core Solidity pipeline output. The deployable artifacts (.hex, read by the
+# forge tests via vm.readFile), the generated Yul codegen, and the toolchain
+# stamp are committed so a fresh clone can forge test without the pinned
+# toolchain; intermediates (*.hull) stay local. This must be core/build/*
+# (not core/build/): git never descends into an excluded directory, so
+# negations cannot pierce a directory-level ignore.
+core/build/*
+!core/build/Kodyl.hex
+!core/build/Probe.hex
+!core/build/Kodyl.yul
+!core/build/Probe.yul
+!core/build/TOOLCHAIN
 
 # Pinned toolchain (machine-local nix GC roots + std snapshot;
 # recreate with scripts/pin-toolchain.sh)

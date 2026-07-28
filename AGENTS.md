@@ -41,11 +41,21 @@ The toolchain is pinned by `scripts/pin-toolchain.sh` into `toolchain/`
 (gitignored): nix-built `sol-core`/`yule` as GC-rooted links, a matching `std`
 snapshot, and the solcore rev in `toolchain/SOLCORE_REV` - binaries and std
 move together or not at all. `check-core.sh` consumes them (env-overridable)
-and stamps every build into `core/build/TOOLCHAIN`. **Do not modify the
-solcore repo.** After
+and stamps every build into `core/build/TOOLCHAIN`. The build outputs that
+matter (`core/build/*.hex`, `*.yul`, `TOOLCHAIN`) are **committed** so a
+fresh clone can `forge test` without the toolchain; `*.hull`/`*.abi`
+intermediates stay local. **Do not modify the solcore repo.** After
 editing a `.solc` file, always `check-core.sh` then `forge test` - the tests
 assert selectors, event topics, and revert payloads byte-for-byte, so a
-hand-rolled encoding mistake surfaces immediately.
+hand-rolled encoding mistake surfaces immediately - and commit the changed
+`core/build` artifacts with the source change.
+
+CI (`.github/workflows/ci.yml`) runs three verification jobs behind a
+change-detection gate job: `forge-test` (the suite plus
+the frontend-ABI drift check), `frontend` (npm build, on frontend changes),
+and `reproduce-core` (rebuilds `core/build` from source at the pinned solcore
+rev and fails unless the committed hex/yul are byte-identical - see
+`VERIFICATION.md`).
 
 ## Key invariants (test aggressively)
 
@@ -99,5 +109,20 @@ shared-custody accounting; `test/KodylInvariant.t.sol` fuzzes the ledger.
 
 ## Networks
 
-Local `anvil` only (via `scripts/deploy-anvil.sh`). Not deployed anywhere; Core
-Solidity is a research language, not production-ready.
+- **Local anvil**: `scripts/deploy-anvil.sh` (guarded: with the defaulted dev
+  key it refuses any chain id other than 31337). Ephemeral; writes
+  `frontend/src/deployment.json` directly, never a `deployments/` record.
+- **Sepolia (or another testnet)**: `scripts/deploy-testnet.sh` only.
+  Env-based signer - `ACCOUNT` (cast keystore) or `PRIVATE_KEY` env, never
+  argv; `EXPECTED_CHAIN_ID` is asserted against the node; mainnet (chain id
+  1) is hard-refused regardless. Do not weaken any of these guards.
+- **Records**: each live deployment writes `deployments/<chainid>.json`
+  (address, chainId, rpcUrl, deployBlock, initcodeSha256, solcoreRev,
+  timestamp) - these are committed. The frontend follows
+  `frontend/src/deployment.json`: point it at a network by copying the
+  record there (`cp deployments/<chainid>.json frontend/src/deployment.json`).
+- Demo affordances (dev-key session picker, fast-forward) are chain-gated off
+  outside 31337; the bundled anvil dev keys must stay unreachable off-local.
+
+Mainnet is out of scope: Core Solidity is a research language, not
+production-ready.

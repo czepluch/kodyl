@@ -4,9 +4,10 @@
 // carries the (hand-authored) events.
 //
 // Logs live in a module-level incremental store: each sync fetches only
-// max(deployBlock, watermark + 1)..latest and appends, so chain history is
-// decoded once, not per tick, and eth_getLogs ranges stay small (public
-// providers cap them). Block timestamps are cached per block number - one
+// max(deployBlock, watermark + 1)..latest, in chunks of at most
+// MAX_LOGS_RANGE blocks, and appends, so chain history is decoded once, not
+// per tick, and every eth_getLogs range fits public providers' caps. Block
+// timestamps are cached per block number - one
 // getBlock per log-bearing block ever seen. The store resets when the
 // deployment address changes (stale deployment.json swap during dev) or when
 // the chain got shorter (anvil restart: latest < watermark). Reorg-proofing
@@ -17,6 +18,12 @@ import deployment from './deployment.json'
 
 // Field is absent in stale deployment records - scan from genesis then.
 const DEPLOY_BLOCK = BigInt((deployment as { deployBlock?: number }).deployBlock ?? 0)
+
+// Free-tier public RPCs commonly cap eth_getLogs spans around 10k blocks;
+// staying just under keeps every request inside the cap, so the first sync
+// over an aged testnet's whole deployBlock..latest history cannot be
+// rejected outright. On anvil the range fits one chunk and nothing changes.
+const MAX_LOGS_RANGE = 9000n // blocks per eth_getLogs request
 
 // The attendee-status-affecting events, and the status each implies.
 const ROSTER_EVENTS = ['Registered', 'RegistrationCancelled', 'CheckedIn', 'RefundClaimed', 'Claimed'] as const
@@ -65,8 +72,9 @@ function order(a: AnyLog, b: AnyLog): number {
 let inflight: Promise<void> | null = null
 
 // Pull the store up to the chain head. Concurrent callers share one in-flight
-// fetch (no double-append), and once synced the call reduces to a (viem-cached)
-// eth_blockNumber, so consumers can await it freely.
+// sync - covering all of its chunks, so no double-append - and once synced the
+// call reduces to a (viem-cached) eth_blockNumber, so consumers can await it
+// freely.
 export function ensureSynced(latestHint?: bigint): Promise<void> {
   if (inflight) return inflight
   inflight = sync(latestHint).finally(() => {
@@ -79,13 +87,25 @@ async function sync(latestHint?: bigint): Promise<void> {
   if (store.address !== CONTRACT) reset()
   const latest = latestHint ?? (await publicClient.getBlockNumber())
   if (latest < store.synced) reset()
-  const from = store.synced < DEPLOY_BLOCK ? DEPLOY_BLOCK : store.synced + 1n
-  if (from > latest) return
+  let from = store.synced < DEPLOY_BLOCK ? DEPLOY_BLOCK : store.synced + 1n
+  while (from <= latest) {
+    const to = from + MAX_LOGS_RANGE - 1n < latest ? from + MAX_LOGS_RANGE - 1n : latest
+    await syncChunk(from, to)
+    // The watermark advances only once the chunk is fully appended: a failure
+    // mid-sync resumes from the last completed chunk on the next call, and the
+    // seen-set dedupes any overlap regardless.
+    store.synced = to
+    from = to + 1n
+  }
+}
+
+// Fetch, dedupe, timestamp and append one block range's logs.
+async function syncChunk(from: bigint, to: bigint): Promise<void> {
   const raw = (await publicClient.getContractEvents({
     address: CONTRACT,
     abi,
     fromBlock: from,
-    toBlock: latest,
+    toBlock: to,
   })) as AnyLog[]
   const fresh = raw.filter((l) => !store.seen.has(`${l.transactionHash}:${l.logIndex}`)).sort(order)
   const missing = [...new Set(fresh.map((l) => (l.blockNumber ?? 0n).toString()))].filter(
@@ -108,7 +128,6 @@ async function sync(latestHint?: bigint): Promise<void> {
     })
   }
   if (fresh.length > 0) store.version++
-  store.synced = latest
 }
 
 export type RosterEntry = { address: `0x${string}`; status: string; ts: number }
