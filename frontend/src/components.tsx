@@ -100,7 +100,9 @@ export function EventTitle({ uri, id }: { uri: string; id: bigint }) {
 
 // --- contextual actions (attendee + organizer) ---
 
-export function EventActions({ ev, roster }: { ev: EventView; roster?: RosterEntry[] }) {
+// roster: undefined on cards (no roster fetched there), null while the event
+// page is still loading it, an array once loaded.
+export function EventActions({ ev, roster }: { ev: EventView; roster?: RosterEntry[] | null }) {
   const { session, now, busy, run } = useApp()
   const me = session.address
   const organizer = isOrganizer(ev, me)
@@ -139,11 +141,13 @@ export function EventActions({ ev, roster }: { ev: EventView; roster?: RosterEnt
 
       {organizer &&
         (ev.state === 1 || ev.state === 2) &&
-        (roster ? (
-          <CheckIn ev={ev} roster={roster} />
-        ) : (
+        (roster === undefined ? (
           // Cards have no roster data - check-in lives on the event page.
           <a className="ghost-link" href={to(`/event/${ev.id}`)}>Check in attendees on the event page &rarr;</a>
+        ) : roster === null ? (
+          <span className="muted">Loading roster&hellip;</span>
+        ) : (
+          <CheckIn ev={ev} roster={roster} />
         ))}
       {organizer && ev.state === 0 && !ev.cancelled && (
         <button className="ghost" disabled={disabled} onClick={() => run('Cancel event', () => session.sendTx('cancelEvent', [ev.id]))}>
@@ -308,7 +312,7 @@ export function JumpButton({ ev }: { ev: EventView }) {
   if (!isLocalChain || ev.state >= 3 || ev.cancelled) return null
   return (
     <button className="ghost sm" disabled={busy} onClick={() => run('Advance to next phase', () => warpTo(nextPhaseTs(ev)))}>
-      &#9193; Jump to {STATE_LABELS[ev.state + 1] ?? 'Settled'}
+      Jump to {STATE_LABELS[ev.state + 1] ?? 'Settled'} &raquo;
     </button>
   )
 }

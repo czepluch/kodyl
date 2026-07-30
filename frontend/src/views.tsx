@@ -110,7 +110,7 @@ export function EventPage({ id }: { id: bigint }) {
         <div><span>Your status</span><b>{STATUS_LABELS[ev.myStatus] ?? '?'}</b></div>
       </div>
 
-      <EventActions ev={ev} roster={roster ?? []} />
+      <EventActions ev={ev} roster={roster} />
 
       <h3 className="roster-h">Attendees <span className="muted">(from event logs)</span></h3>
       {roster === null ? (
