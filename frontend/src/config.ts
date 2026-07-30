@@ -73,3 +73,11 @@ export function walletFor(pk: Hex) {
 // ADT ordinals exposed across the ABI boundary as uint256 (see Kodyl.solc).
 export const STATE_LABELS = ['Registration', 'Active', 'Dispute', 'Settled', 'Cancelled'] as const
 export const STATUS_LABELS = ['None', 'Registered', 'Cancelled', 'Checked in', 'Claimed'] as const
+
+// Voucher mailbox (phase 2 service). Override with VITE_MAILBOX_URL; the demo
+// default matches `node mailbox/server.mjs`. Trailing slash trimmed so URL
+// joins are predictable.
+export const MAILBOX_URL = ((import.meta.env.VITE_MAILBOX_URL as string | undefined) ?? 'http://localhost:8787').replace(
+  /\/$/,
+  '',
+)

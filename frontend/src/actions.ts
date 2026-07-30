@@ -38,6 +38,16 @@ const FRIENDLY: Record<string, (args: readonly unknown[]) => string> = {
   NonPayableReceivedValue: () => 'This function does not accept ETH.',
   DirtyHigherBitsForAddress: () => 'The address argument is malformed (non-zero upper bits).',
   EventAlreadyStarted: () => 'The event has already started.',
+  // Proof-based check-in.
+  TicketSignerMismatch: () => 'The ticket signature does not match the claimed attendee.',
+  PresenceSignerUnauthorized: () => 'The presence signature is not from the organizer or an authorized operator.',
+  ProofExpired: () => 'This check-in proof has expired (its 24-hour window has passed).',
+  InvalidSignatureLength: () => 'A signature is malformed (it must be 65 bytes).',
+  ProofArrayMismatch: () => 'The batch proof arrays have mismatched lengths.',
+  MalleableSignatureRejected: () => 'The signature was rejected as malleable (high-s form).',
+  ECRecoverFailed: () => 'A signature could not be recovered to a signer.',
+  ECRecoverCallFailed: () => 'Signature recovery failed at the precompile.',
+  ArrayOutOfBounds: () => 'A batch index was out of range.',
 }
 
 // Turn a viem revert into a human sentence when the error is known, else the

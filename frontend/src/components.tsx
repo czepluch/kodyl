@@ -1,13 +1,19 @@
-import { useState } from 'react'
-import { isAddress } from 'viem'
-import { ACCOUNTS, STATE_LABELS, STATUS_LABELS, isLocalChain } from './config'
+import { useEffect, useState } from 'react'
+import { type Hex, isAddress, recoverTypedDataAddress } from 'viem'
+import { ACCOUNTS, CONTRACT, STATE_LABELS, STATUS_LABELS, chain, isLocalChain } from './config'
 import { useApp } from './ctx'
 import { type EventView } from './useKodyl'
 import { type RosterEntry } from './logs'
 import { warpBy, warpTo } from './actions'
 import { useMetadata } from './metadata'
 import { type Route, to } from './router'
+import { DOMAIN, PRESENCE_TYPES, TICKET_TYPES } from './eip712'
+import { type TicketVoucher, type Voucher, addToOutbox, loadTicket, outboxFor, removeFromOutbox, saveTicket } from './outbox'
+import { fetchVoucher, postVoucher } from './mailbox'
+import { QrCode, QrScanner } from './qr'
 import { DUST_CLAIM_TIMEOUT, fmtDuration, fmtEth, fmtTime, shortAddr } from './format'
+
+const PROOF_WINDOW = 24 * 3600 // seconds; matches the Presence validUntil window
 
 const DAY = 86400
 
@@ -132,6 +138,8 @@ export function EventActions({ ev, roster }: { ev: EventView; roster?: RosterEnt
           Claim refund
         </button>
       )}
+      {ev.myStatus === 1 && !ev.cancelled && ev.state < 3 && <TicketButton ev={ev} />}
+      {ev.myStatus === 1 && !ev.cancelled && (ev.state === 1 || ev.state === 2) && <SelfRescue ev={ev} />}
       {ev.state === 3 && ev.myStatus === 3 && !swept && (
         <button disabled={disabled} onClick={() => run('Claim payout', () => session.sendTx('claim', [ev.id]))}>
           Claim payout
@@ -170,12 +178,113 @@ export function EventActions({ ev, roster }: { ev: EventView; roster?: RosterEnt
   )
 }
 
+// --- clipboard helper ---
+
+function CopyButton({ text, label = 'Copy' }: { text: string; label?: string }) {
+  const [done, setDone] = useState(false)
+  async function copy() {
+    try {
+      await navigator.clipboard.writeText(text)
+      setDone(true)
+      setTimeout(() => setDone(false), 1500)
+    } catch {
+      // Clipboard blocked (insecure context / permission): the textarea is
+      // still selectable by hand.
+    }
+  }
+  return (
+    <button type="button" className="ghost sm" onClick={copy}>
+      {done ? 'Copied' : label}
+    </button>
+  )
+}
+
+// --- attendee ticket: sign once, show as copyable text + QR ---
+
+// The voucher the door consumes: eventId + attendee + the attendee's Ticket
+// signature. Serialized compact for the QR.
+function ticketJson(v: TicketVoucher): string {
+  return JSON.stringify({ eventId: v.eventId, attendee: v.attendee, ticketSig: v.ticketSig })
+}
+
+function TicketButton({ ev }: { ev: EventView }) {
+  const { session, busy, run } = useApp()
+  const me = session.address
+  const [ticket, setTicket] = useState<TicketVoucher | null>(() => loadTicket(ev.id, me))
+  const [open, setOpen] = useState(false)
+
+  // Identity or event changed: reload the cached ticket for this pair.
+  useEffect(() => {
+    setTicket(loadTicket(ev.id, me))
+    setOpen(false)
+  }, [ev.id, me])
+
+  function show() {
+    if (ticket) {
+      setOpen((o) => !o)
+      return
+    }
+    // A pure signature (no tx); run() gives the same toast + a harmless refresh.
+    run('Sign ticket', async () => {
+      const sig = (await session.signTypedData(DOMAIN, TICKET_TYPES, 'Ticket', { eventId: ev.id })) as string
+      const v: TicketVoucher = { eventId: ev.id.toString(), attendee: me, ticketSig: sig }
+      saveTicket(v)
+      setTicket(v)
+      setOpen(true)
+    })
+  }
+
+  return (
+    <div style={{ flexBasis: '100%' }}>
+      <button className="ghost" disabled={busy || !session.connected} onClick={show}>
+        {ticket ? (open ? 'Hide ticket' : 'Show ticket') : 'Sign ticket'}
+      </button>
+      {open && ticket && (
+        <div className="voucher">
+          <QrCode text={ticketJson(ticket)} />
+          <div className="voucher-side">
+            <p className="muted" style={{ margin: '0 0 6px' }}>
+              Show this at the door, or copy the text to send it.
+            </p>
+            <textarea
+              className="voucher-text"
+              readOnly
+              value={ticketJson(ticket)}
+              onFocus={(e) => e.currentTarget.select()}
+            />
+            <CopyButton text={ticketJson(ticket)} label="Copy ticket" />
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
+
+// Check-in area on the event page: the roster path (organizer transaction) and
+// the proof-based Door path (sign a Presence, submit anyone's pair) as tabs.
+function CheckIn({ ev, roster }: { ev: EventView; roster: RosterEntry[] }) {
+  const [tab, setTab] = useState<'roster' | 'door'>('roster')
+  return (
+    <div style={{ flexBasis: '100%' }}>
+      <div className="tabs">
+        <button className={tab === 'roster' ? 'tab active' : 'tab'} onClick={() => setTab('roster')}>
+          Roster
+        </button>
+        <button className={tab === 'door' ? 'tab active' : 'tab'} onClick={() => setTab('door')}>
+          Door
+        </button>
+      </div>
+      {tab === 'roster' ? <RosterCheckIn ev={ev} roster={roster} /> : <Door ev={ev} roster={roster} />}
+    </div>
+  )
+}
+
 // Roster-driven check-in (event page only; cards link here). One selection
 // goes through checkIn; several go through checkInBatch(uint256,address[]),
 // the call the contract dispatches by hand-decoding calldata in its payable
 // fallback. The free-text input covers an attendee not yet visible in logs.
 // Inline layout styles: styles.css is out of scope for this phase.
-function CheckIn({ ev, roster }: { ev: EventView; roster: RosterEntry[] }) {
+function RosterCheckIn({ ev, roster }: { ev: EventView; roster: RosterEntry[] }) {
   const { session, busy, run } = useApp()
   const [selected, setSelected] = useState<Record<string, boolean>>({})
   const [extra, setExtra] = useState('')
@@ -235,6 +344,265 @@ function CheckIn({ ev, roster }: { ev: EventView; roster: RosterEntry[] }) {
         Selecting several sends one checkInBatch call, dispatched by the contract's hand-decoded fallback.
       </p>
     </div>
+  )
+}
+
+// Door: verify an attendee's ticket, countersign a Presence, and submit the
+// pair on-chain. The organizer (or an operator) signs; anyone can submit,
+// which is why the pending pile persists in the outbox until it confirms.
+function Door({ ev, roster }: { ev: EventView; roster: RosterEntry[] }) {
+  const { session, now, busy, run } = useApp()
+  const [text, setText] = useState('')
+  const [scanning, setScanning] = useState(false)
+  const [note, setNote] = useState<string | null>(null)
+  const [pending, setPending] = useState<Voucher[]>(() => outboxFor(ev.id))
+
+  const refreshPending = () => setPending(outboxFor(ev.id))
+
+  // Drop pending entries the roster now shows as checked in: submitted by us,
+  // by another operator, or self-rescued by the attendee.
+  useEffect(() => {
+    const checkedIn = new Set(
+      roster.filter((r) => r.status === 'Checked in').map((r) => r.address.toLowerCase()),
+    )
+    let changed = false
+    for (const v of outboxFor(ev.id)) {
+      if (checkedIn.has(v.attendee.toLowerCase())) {
+        removeFromOutbox(ev.id, v.attendee)
+        changed = true
+      }
+    }
+    if (changed) refreshPending()
+  }, [roster, ev.id])
+
+  const rosterStatus = (addr: string) =>
+    roster.find((r) => r.address.toLowerCase() === addr.toLowerCase())?.status
+
+  async function accept(raw: string) {
+    setNote(null)
+    if (now === 0) return setNote('Chain time not loaded yet - try again in a moment.')
+    let parsed: { eventId?: unknown; attendee?: unknown; ticketSig?: unknown }
+    try {
+      parsed = JSON.parse(raw.trim())
+    } catch {
+      return setNote('That is not a valid ticket (expected JSON).')
+    }
+    const eventId = String(parsed.eventId ?? '')
+    const attendee = String(parsed.attendee ?? '')
+    const ticketSig = String(parsed.ticketSig ?? '')
+    if (eventId !== ev.id.toString()) return setNote(`That ticket is for event #${eventId || '?'}, not this one.`)
+    if (!isAddress(attendee) || !/^0x[0-9a-fA-F]{130}$/.test(ticketSig))
+      return setNote('The ticket is missing a valid attendee or signature.')
+
+    let signer: string
+    try {
+      signer = await recoverTypedDataAddress({
+        domain: DOMAIN,
+        types: TICKET_TYPES,
+        primaryType: 'Ticket',
+        message: { eventId: ev.id },
+        signature: ticketSig as Hex,
+      })
+    } catch {
+      return setNote('The ticket signature could not be verified.')
+    }
+    if (signer.toLowerCase() !== attendee.toLowerCase())
+      return setNote('The ticket signature does not match the claimed attendee.')
+
+    const status = rosterStatus(attendee)
+    if (status === 'Checked in') return setNote(`${shortAddr(attendee)} is already checked in.`)
+    if (status !== 'Registered') return setNote(`${shortAddr(attendee)} is not a registered attendee.`)
+
+    const validUntil = BigInt(now + PROOF_WINDOW)
+    await run('Countersign presence', async () => {
+      const presenceSig = (await session.signTypedData(DOMAIN, PRESENCE_TYPES, 'Presence', {
+        eventId: ev.id,
+        attendee: attendee as `0x${string}`,
+        validUntil,
+      })) as string
+      const voucher: Voucher = {
+        eventId: ev.id.toString(),
+        attendee,
+        validUntil: validUntil.toString(),
+        ticketSig,
+        presenceSig,
+        chainId: chain.id.toString(),
+        contract: CONTRACT,
+      }
+      addToOutbox(voucher)
+      refreshPending()
+      setText('')
+      setNote(`${shortAddr(attendee)} added to the pending pile.`)
+      postVoucher(voucher).catch(() => {}) // best-effort relay; the outbox is the record
+    })
+  }
+
+  const isExpired = (v: Voucher) => now > 0 && Number(v.validUntil) < now
+
+  function submitAll() {
+    // Exclude expired proofs: the batch is all-or-nothing on-chain (one expired
+    // proof reverts every check-in with ProofExpired), so a stale voucher would
+    // poison an otherwise-valid batch. Expired entries stay in the pile, flagged,
+    // for the operator to remove.
+    const items = outboxFor(ev.id).filter((v) => !isExpired(v))
+    if (items.length === 0) {
+      setNote('All pending proofs have expired - remove them and re-scan.')
+      return
+    }
+    const label = items.length === 1 ? 'Submit check-in' : `Submit ${items.length} check-ins`
+    run(label, async () => {
+      if (items.length === 1) {
+        const v = items[0]
+        await session.sendTx('checkInWithProof', [
+          BigInt(v.eventId),
+          v.attendee as `0x${string}`,
+          BigInt(v.validUntil),
+          v.ticketSig as Hex,
+          v.presenceSig as Hex,
+        ])
+      } else {
+        await session.sendTx('checkInBatchWithProofs', [
+          ev.id,
+          items.map((v) => v.attendee as `0x${string}`),
+          items.map((v) => BigInt(v.validUntil)),
+          items.map((v) => v.ticketSig as Hex),
+          items.map((v) => v.presenceSig as Hex),
+        ])
+      }
+      // Success: every submitted voucher is now consumed (idempotent on-chain).
+      for (const v of items) removeFromOutbox(ev.id, v.attendee)
+      refreshPending()
+    })
+  }
+
+  function drop(attendee: string) {
+    removeFromOutbox(ev.id, attendee)
+    refreshPending()
+  }
+
+  return (
+    <div>
+      <p className="muted" style={{ fontSize: 13, margin: '0 0 8px' }}>
+        Scan or paste an attendee&rsquo;s ticket. You countersign their presence; anyone can then submit the pair
+        on-chain within 24 hours.
+      </p>
+      {scanning ? (
+        <QrScanner
+          onResult={(t) => {
+            setScanning(false)
+            accept(t)
+          }}
+          onCancel={() => setScanning(false)}
+        />
+      ) : (
+        <>
+          <div className="checkin">
+            <button className="ghost sm" disabled={busy} onClick={() => setScanning(true)}>
+              Scan QR
+            </button>
+          </div>
+          <textarea
+            className="voucher-text"
+            style={{ marginTop: 6 }}
+            placeholder={'Paste a ticket: {"eventId":"1","attendee":"0x...","ticketSig":"0x..."}'}
+            value={text}
+            onChange={(e) => setText(e.target.value)}
+          />
+          <button
+            className="ghost sm"
+            disabled={busy || !session.connected || text.trim() === ''}
+            onClick={() => accept(text)}
+          >
+            Verify &amp; countersign
+          </button>
+        </>
+      )}
+      {note && (
+        <p className="muted" style={{ fontSize: 12, margin: '6px 0 0' }}>
+          {note}
+        </p>
+      )}
+
+      {pending.length > 0 && (
+        <div className="door-pending">
+          <div className="door-pending-head">
+            <span>Pending presence ({pending.length})</span>
+            <button
+              disabled={busy || !session.connected || pending.every(isExpired)}
+              onClick={submitAll}
+            >
+              Submit {pending.filter((v) => !isExpired(v)).length > 1 ? `${pending.filter((v) => !isExpired(v)).length} ` : ''}
+              on-chain
+            </button>
+          </div>
+          <ul>
+            {pending.map((v) => (
+              <li key={v.attendee}>
+                <code title={v.attendee}>{shortAddr(v.attendee)}</code>
+                {isExpired(v) && <span className="tag expired">expired</span>}
+                <button className="ghost sm" onClick={() => drop(v.attendee)}>
+                  remove
+                </button>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+    </div>
+  )
+}
+
+// Attendee self-rescue: if the door countersigned and relayed a Presence to the
+// mailbox but never submitted, the attendee can finalize their own check-in.
+function SelfRescue({ ev }: { ev: EventView }) {
+  const { session, now, busy, run } = useApp()
+  const me = session.address
+  const [voucher, setVoucher] = useState<Voucher | null>(null)
+
+  // Poll the mailbox on a coarse timer (not the per-second UI clock), and
+  // re-poll when the identity or event changes.
+  useEffect(() => {
+    let live = true
+    const poll = () =>
+      fetchVoucher(ev.id, me)
+        .then((v) => {
+          if (!live) return
+          // The mailbox is untrusted (a hostile one could return a voucher for
+          // a different attendee or event). Only ever act on one that is for ME
+          // and THIS event; otherwise finalize would submit someone else's
+          // check-in on my dime and the button would never clear (my status
+          // stays Registered). The contract still verifies the signatures.
+          const mine = v && v.attendee?.toLowerCase() === me.toLowerCase() && v.eventId === ev.id.toString()
+          setVoucher(mine ? v : null)
+        })
+        .catch(() => {})
+    poll()
+    const t = setInterval(poll, 10000)
+    return () => {
+      live = false
+      clearInterval(t)
+    }
+  }, [ev.id, me])
+
+  if (!voucher) return null
+  const expired = now > 0 && Number(voucher.validUntil) < now
+  return (
+    <button
+      disabled={busy || !session.connected || expired}
+      onClick={() =>
+        run('Finalize check-in', () =>
+          session.sendTx('checkInWithProof', [
+            BigInt(voucher.eventId),
+            voucher.attendee as `0x${string}`,
+            BigInt(voucher.validUntil),
+            voucher.ticketSig as Hex,
+            voucher.presenceSig as Hex,
+          ]),
+        )
+      }
+    >
+      {expired ? 'Check-in proof expired' : 'Finalize check-in (proof waiting)'}
+    </button>
   )
 }
 

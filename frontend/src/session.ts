@@ -7,7 +7,7 @@
 // it the mode starts at - and is pinned to - wallet, so no path reaches the
 // compiled-in dev keys (walletFor throws off-chain-31337 as a second wall).
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { type Hex, type WalletClient, createWalletClient, custom } from 'viem'
+import { type Hex, type TypedDataDomain, type WalletClient, createWalletClient, custom } from 'viem'
 import { ACCOUNTS, CONTRACT, RPC_URL, abi, chain, isLocalChain, publicClient, walletFor } from './config'
 
 const ZERO = '0x0000000000000000000000000000000000000000' as const
@@ -36,6 +36,10 @@ async function ensureChain(eth: Eip1193): Promise<void> {
   }
 }
 
+// Loose typed-data shapes: the caller (eip712.ts) owns the exact string
+// layouts; session only needs to route the sign to the right key.
+type TypedDataTypes = Record<string, readonly { name: string; type: string }[]>
+
 export type Session = {
   mode: Mode
   address: `0x${string}`
@@ -45,6 +49,14 @@ export type Session = {
   useDemo: () => void
   connect: () => Promise<void>
   sendTx: (functionName: string, args: unknown[], value?: bigint) => Promise<void>
+  // Signs an EIP-712 typed message (a Ticket or Presence) with the active
+  // identity. Not a transaction: no receipt wait, returns the 65-byte sig.
+  signTypedData: (
+    domain: TypedDataDomain,
+    types: TypedDataTypes,
+    primaryType: string,
+    message: Record<string, unknown>,
+  ) => Promise<Hex>
 }
 
 export function useSession(): Session {
@@ -119,8 +131,26 @@ export function useSession(): Session {
     [mode, wallet, walletAddr, demoIdx],
   )
 
+  const signTypedData = useCallback(
+    async (
+      domain: TypedDataDomain,
+      types: TypedDataTypes,
+      primaryType: string,
+      message: Record<string, unknown>,
+    ): Promise<Hex> => {
+      // Same two branches as sendTx; no waitForTransactionReceipt - a signature
+      // is not a transaction.
+      if (mode === 'wallet') {
+        if (!wallet || !walletAddr) throw new Error('Connect a wallet first.')
+        return wallet.signTypedData({ account: walletAddr, domain, types, primaryType, message } as never)
+      }
+      return walletFor(ACCOUNTS[demoIdx].pk).signTypedData({ domain, types, primaryType, message } as never)
+    },
+    [mode, wallet, walletAddr, demoIdx],
+  )
+
   return useMemo(
-    () => ({ mode, address, connected, demoIdx, setDemoIdx, useDemo, connect, sendTx }),
-    [mode, address, connected, demoIdx, useDemo, connect, sendTx],
+    () => ({ mode, address, connected, demoIdx, setDemoIdx, useDemo, connect, sendTx, signTypedData }),
+    [mode, address, connected, demoIdx, useDemo, connect, sendTx, signTypedData],
   )
 }
