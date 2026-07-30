@@ -31,3 +31,6 @@ core/build/*
 # Pinned toolchain (machine-local nix GC roots + std snapshot;
 # recreate with scripts/pin-toolchain.sh)
 toolchain/
+
+# Mailbox runtime snapshot (best-effort persistence; regenerated on POST)
+mailbox/vouchers.json
