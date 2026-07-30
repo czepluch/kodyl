@@ -491,10 +491,11 @@ contract Kodyl {
 
     // --- fallback: stray-ETH rejection + checkInBatch manual dispatch ---
 
-    // checkInBatch(uint256,address[]) cannot be a typed public function (the
-    // std ABI decoder for dynamic arrays is a stub), so its calldata is
-    // decoded by hand here. Plain ETH transfers (empty calldata) and unknown
-    // selectors revert.
+    // checkInBatch(uint256,address[]) predates lazy calldata-array decoding
+    // (landed at the 1950e707 re-pin) and stays hand-decoded deliberately:
+    // wire compat, the stray-ETH rejection lives in this same fallback, and
+    // it is the exhibit of what pre-decoder Core Solidity required. Plain ETH
+    // transfers (empty calldata) and unknown selectors revert.
     function checkInBatchImpl() -> () {
         let eid = uint256(calldataload(4));
         match eventsRec[eid] {

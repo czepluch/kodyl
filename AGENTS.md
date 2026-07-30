@@ -80,9 +80,13 @@ shared-custody accounting; `test/KodylInvariant.t.sol` fuzzes the ledger.
   every guard.
 - **No `event`/`emit`** - events are hand-rolled `log1..log3`; topic0 via
   compile-time-folded `keccakLit("Sig(...)")`.
-- **No `receive`, and dynamic-array params are a decoder stub** - both handled
-  in the `payable fallback` (empty calldata rejects ETH; `checkInBatch` is
-  decoded from calldata by hand).
+- **No `receive`** - handled in the `payable fallback` (empty calldata rejects
+  ETH). Lazy calldata dynamic-array decoding (`calldata(array(T))` params,
+  `arr[i]`/`arr.length()`) landed at the `1950e707` re-pin - the memory-array
+  decoder is still a stub, so array params must be spelled `calldata(...)`.
+  `checkInBatch` REMAINS hand-decoded in the fallback deliberately: wire
+  compat, the stray-ETH rejection lives there, and it is the historical
+  exhibit. Do not migrate it.
 - **String literals** materialize at runtime, but the native `require(cond,
   "msg")` revert is raw bytes, not Solidity `Error(string)` - so reason
   strings live in source and go through `revertStr`, which builds the

@@ -15,7 +15,9 @@ research language compiled by `sol-core`. It is a deliberate exercise in
 building a real, non-trivial contract on the language as it exists today -
 leaning into what it does well (payload-carrying ADTs as first-class storage,
 exhaustive `match`, typeclass-derived encoding) and documenting where it does
-not yet reach (checked arithmetic, events, dynamic-array params - all shimmed).
+not yet reach (checked arithmetic and events, both shimmed; array params must
+be spelled `calldata(...)` - the hand-decoded `checkInBatch` remains as the
+exhibit of the pre-decoder era).
 
 There is no "classic Solidity" version here; the design is native to Core
 Solidity (a **singleton** holding all events as ADT values in a map, rather than
@@ -78,7 +80,9 @@ For the demo dApp against a local anvil node, see [`frontend/README.md`](./front
 ## Measured
 
 From `scripts/measure.sh` (a full lifecycle on a scratch anvil node,
-deterministic timestamps, solcore rev `8a77bd3f`):
+deterministic timestamps, solcore rev `1950e707` - byte-identical `Kodyl.hex`
+to the previous `8a77bd3f` pin, so every number carried over unchanged on
+rerun):
 
 | Measurement | Value |
 |---|---:|

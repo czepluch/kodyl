@@ -65,9 +65,12 @@ ledger fuzz across three concurrent events), plus `test/KodylAccounting.t.sol`
 and `test/KodylConservation.t.sol` (reentrancy + full-lifecycle conservation),
 drive the compiled bytecode through a typed Solidity interface inside forge -
 selectors, event topics, and revert payloads are asserted byte-for-byte.
-`test/CoreProbe.t.sol` adds 5 canary tests pinning the language behaviors the
+`test/CoreProbe.t.sol` adds 14 canary tests pinning the language behaviors the
 design leans on (raw-bytes `require` reverts, `Str`-instance selector folding,
-UFCS storage arrays, bare literals).
+UFCS storage arrays, bare literals, std eip712 helpers plus the hand-rolled
+hashStruct pattern, split-form `ecrecover` with its revert-not-zero failure
+modes, and lazy calldata dynamic arrays: address, bytes, and uint256
+elements).
 
 ## What the language provides vs what the module shims
 
@@ -83,9 +86,11 @@ the module system.
 
 Shimmed in `kodyl.solc` because the language does not have it yet (each maps
 to a tracked upstream gap). The list is also a changelog of the language
-closing gaps: it has already shrunk once - the re-pin to solcore `8a77bd3f`
-brought runtime string literals, moving item 4 from fully-shimmed to
-wire-shape-only - so each item carries its status at the pinned rev.
+closing gaps: it has shrunk twice - the `8a77bd3f` re-pin brought runtime
+string literals, moving item 4 from fully-shimmed to wire-shape-only, and the
+`1950e707` re-pin brought lazy calldata-array decoding, moving item 5 from
+gap-workaround to deliberate retention - so each item carries its status at
+the pinned rev.
 
 1. **Checked arithmetic** (`addCk`/`subCk`/`mulCk`/`solAssert` reproducing
    `Panic(0x11)`/`0x01`) - operators wrap today (solcore #484, still open
@@ -108,10 +113,14 @@ wire-shape-only - so each item carries its status at the pinned rev.
    ABI encoding by hand - and the constructor keeps one precomputed packed
    word ("Zero address"), because string literals do not materialize in
    deploy code.
-5. **`receive` and dynamic-array parameters** - both live in the payable
-   fallback: empty calldata reverts (stray-ETH rejection), and
-   `checkInBatch(uint256,address[])` is decoded from calldata by hand (the
-   std array decoder is a stub).
+5. **`receive`, and one historical array decoder** - the payable fallback
+   rejects stray ETH (empty calldata reverts) and hand-decodes
+   `checkInBatch(uint256,address[])` from raw calldata. The hand-decoding
+   predates the `1950e707` re-pin, which brought lazy calldata dynamic-array
+   decoding (`calldata(array(T))` params with `arr[i]`/`arr.length()`; the
+   memory-array decoder is still a stub). `checkInBatch` stays hand-decoded
+   deliberately - wire compat, the ETH rejection lives in the same fallback,
+   and it is the exhibit of what pre-decoder Core Solidity required.
 6. **Environment globals** - `msg.sender`/`block.timestamp` etc. are opcode
    wrappers typed in the module.
 

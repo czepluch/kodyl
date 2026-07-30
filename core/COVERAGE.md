@@ -65,9 +65,11 @@ against the compiled Core Solidity bytecode (`test/Kodyl.t.sol` unless noted).
 
 ## checkInBatch calldata decoder (hand-rolled in the payable fallback)
 
-The std array decoder is a stub, so `checkInBatch(uint256,address[])` is
-decoded from raw calldata by hand in the fallback; these tests attack the
-decoder with adversarial byte strings.
+`checkInBatch(uint256,address[])` is decoded from raw calldata by hand in the
+fallback - it predates the lazy calldata-array decoding that landed at the
+`1950e707` re-pin and stays hand-decoded deliberately (wire compat, stray-ETH
+rejection, historical exhibit); these tests attack the decoder with
+adversarial byte strings.
 
 | Behavior | Verified by |
 |---|---|

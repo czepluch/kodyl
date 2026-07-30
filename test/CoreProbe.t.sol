@@ -10,6 +10,17 @@ import {CoreDeploy} from "./CoreDeploy.sol";
 contract CoreProbeTest is Test {
     address p;
 
+    // std ecrecover failure selectors and the lazy calldata-array bounds
+    // selector, derived from their signatures; the literal-value asserts in
+    // the tests pin them to the documented constants.
+    bytes4 constant MALLEABLE_SEL = bytes4(keccak256("MalleableSignatureRejected()"));
+    bytes4 constant ECREC_CALL_FAILED_SEL = bytes4(keccak256("ECRecoverCallFailed()"));
+    bytes4 constant ECREC_FAILED_SEL = bytes4(keccak256("ECRecoverFailed()"));
+    bytes4 constant OOB_SEL = bytes4(keccak256("ArrayOutOfBounds()"));
+
+    uint256 constant SECP256K1_N =
+        0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141;
+
     function setUp() public {
         p = CoreDeploy.deploy("Probe", abi.encode(uint256(42)));
     }
@@ -82,5 +93,203 @@ contract CoreProbeTest is Test {
         (ok, ret) = p.call(abi.encodeWithSignature("bareLit(uint256)", 7));
         assertTrue(ok);
         assertEq(abi.decode(ret, (uint256)), 0);
+    }
+
+    /// std eip712: domain separator and 0x1901 digest match an independent
+    /// Solidity computation of the same EIP-712 layers.
+    function test_probe_eip712_domainSeparator_and_digest() public {
+        uint256 cid = 31337;
+        address ver = address(0xCcCCccccCCCCcCCCCCCcCcCccCcCCCcCcccccccC);
+        bytes32 expectedDom = keccak256(abi.encode(
+            keccak256("EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)"),
+            keccak256("Probe"),
+            keccak256("1"),
+            cid,
+            ver
+        ));
+
+        (bool ok, bytes memory ret) =
+            p.call(abi.encodeWithSignature("eipDomain(uint256,address)", cid, ver));
+        assertTrue(ok, "eipDomain reverted");
+        assertEq(abi.decode(ret, (bytes32)), expectedDom, "domain separator mismatch");
+
+        bytes32 structHash = keccak256("arbitrary struct hash");
+        bytes32 expectedDigest =
+            keccak256(abi.encodePacked(hex"1901", expectedDom, structHash));
+        (ok, ret) = p.call(abi.encodeWithSignature(
+            "eipDigest(uint256,address,bytes32)", cid, ver, structHash));
+        assertTrue(ok, "eipDigest reverted");
+        assertEq(abi.decode(ret, (bytes32)), expectedDigest, "0x1901 digest mismatch");
+    }
+
+    /// Hand-rolled hashStruct via nested two-arg concat equals
+    /// keccak256(abi.encode(typeHash, members...)).
+    function test_probe_eip712_handRolledStructHash() public {
+        uint256 a = 7;
+        address b = address(0xBEEF);
+        bytes32 expected = keccak256(abi.encode(
+            keccak256("Pair(uint256 a,address b)"), a, b));
+        (bool ok, bytes memory ret) =
+            p.call(abi.encodeWithSignature("eipStructHash(uint256,address)", a, b));
+        assertTrue(ok, "eipStructHash reverted");
+        assertEq(abi.decode(ret, (bytes32)), expected, "hashStruct mismatch");
+    }
+
+    /// std ecrecover round-trips a vm.sign signature to the signer address.
+    function test_probe_ecrecover_roundTrip() public {
+        uint256 pk = 0xA11CE;
+        bytes32 digest = keccak256("kodyl ecrecover canary");
+        (uint8 v, bytes32 r, bytes32 s) = vm.sign(pk, digest);
+        (bool ok, bytes memory ret) = p.call(abi.encodeWithSignature(
+            "recoverSigner(bytes32,uint256,bytes32,bytes32)", digest, uint256(v), r, s));
+        assertTrue(ok, "recoverSigner reverted on a valid signature");
+        assertEq(abi.decode(ret, (address)), vm.addr(pk), "wrong signer recovered");
+    }
+
+    /// High-s form of a valid signature reverts MalleableSignatureRejected()
+    /// instead of recovering.
+    function test_probe_ecrecover_malleableHighS_reverts() public {
+        assertEq(MALLEABLE_SEL, bytes4(0x25260b20), "documented selector moved");
+        bytes32 digest = keccak256("kodyl ecrecover canary");
+        (uint8 v, bytes32 r, bytes32 s) = vm.sign(0xA11CE, digest);
+        bytes32 sHigh = bytes32(SECP256K1_N - uint256(s));
+        uint256 vFlip = v == 27 ? 28 : 27;
+        (bool ok, bytes memory ret) = p.call(abi.encodeWithSignature(
+            "recoverSigner(bytes32,uint256,bytes32,bytes32)", digest, vFlip, r, sHigh));
+        assertFalse(ok, "high-s signature did not revert");
+        assertEq(ret, abi.encodeWithSelector(MALLEABLE_SEL), "wrong revert payload");
+    }
+
+    /// A signature the precompile cannot recover (r = 0) reverts
+    /// ECRecoverFailed(): the staticcall SUCCEEDS with empty returndata (the
+    /// precompile never fails on bad input), nothing is copied into scratch,
+    /// std reads the clean-scratch zero and reverts rather than returning the
+    /// zero address.
+    function test_probe_ecrecover_invalid_revertsFailed() public {
+        assertEq(ECREC_FAILED_SEL, bytes4(0x4fbfae63), "documented selector moved");
+        bytes32 digest = keccak256("kodyl ecrecover canary");
+        (bool ok, bytes memory ret) = p.call(abi.encodeWithSignature(
+            "recoverSigner(bytes32,uint256,bytes32,bytes32)",
+            digest, uint256(27), bytes32(0), bytes32(uint256(1))));
+        assertFalse(ok, "invalid signature did not revert");
+        assertEq(ret, abi.encodeWithSelector(ECREC_FAILED_SEL), "wrong revert payload");
+    }
+
+    /// ECRecoverCallFailed() is declared but unobservable: the only way the
+    /// precompile staticcall can fail is gas starvation, and when it does the
+    /// forwarded 63/64 is consumed whole - the 1/64 remainder cannot fund the
+    /// revert-with-payload path, so the frame ends as a plain OOG with empty
+    /// returndata. A step-1 sweep across the entire starvation window (above
+    /// 24000 gas the precompile always has its 3000) proves the selector never
+    /// reaches the wire; every failure in the window is an empty-returndata
+    /// OOG. If a std or gas-schedule change opens the window, this flips.
+    function test_probe_ecrecover_gasStarved_isPlainOogNotCallFailed() public {
+        assertEq(ECREC_CALL_FAILED_SEL, bytes4(0x578763f7), "documented selector moved");
+        bytes32 digest = keccak256("kodyl ecrecover canary");
+        (uint8 v, bytes32 r, bytes32 s) = vm.sign(0xA11CE, digest);
+        bytes memory cd = abi.encodeWithSignature(
+            "recoverSigner(bytes32,uint256,bytes32,bytes32)", digest, uint256(v), r, s);
+        uint256 failures;
+        for (uint256 g = 2000; g <= 24000; g++) {
+            (bool ok, bytes memory ret) = p.call{gas: g}(cd);
+            if (!ok) {
+                failures++;
+                assertEq(ret.length, 0, "starved frame produced a revert payload");
+            }
+        }
+        assertGt(failures, 0, "sweep produced no OOG failures at all");
+        // Pin the sweep's exhaustiveness: the top of the swept range must
+        // succeed outright. Gas is monotone here (the only gas-dependent
+        // branch is the staticcall forwarding gas(), and precompile 1 cannot
+        // fail a valid input for non-gas reasons), so success at 24000
+        // extends to all higher gas - the starvation window lies entirely
+        // inside the sweep. Without this, dispatch-cost growth could push
+        // the window above 24000 and the loop would pass vacuously.
+        (bool okTop, bytes memory retTop) = p.call{gas: 24000}(cd);
+        assertTrue(okTop, "top of swept range did not succeed - window escaped the sweep");
+        assertEq(abi.decode(retTop, (address)), vm.addr(0xA11CE), "wrong signer at window top");
+    }
+
+    /// calldata(array(address)): length, indexing, and the ArrayOutOfBounds()
+    /// auto-revert on an out-of-range index.
+    function test_probe_calldataAddressArray() public {
+        assertEq(OOB_SEL, bytes4(0x7f52b2bf), "documented selector moved");
+        address[] memory arr = new address[](2);
+        arr[0] = address(0x1111111111111111111111111111111111111111);
+        arr[1] = address(0x2222222222222222222222222222222222222222);
+
+        (bool ok, bytes memory ret) =
+            p.call(abi.encodeWithSignature("addrCount(address[])", arr));
+        assertTrue(ok, "addrCount reverted");
+        assertEq(abi.decode(ret, (uint256)), 2);
+
+        (ok, ret) = p.call(abi.encodeWithSignature("addrAt(address[],uint256)", arr, 1));
+        assertTrue(ok, "addrAt reverted");
+        assertEq(abi.decode(ret, (address)), arr[1]);
+
+        (ok, ret) = p.call(abi.encodeWithSignature("addrAt(address[],uint256)", arr, 2));
+        assertFalse(ok, "out-of-range index did not revert");
+        assertEq(ret, abi.encodeWithSelector(OOB_SEL), "wrong revert payload");
+
+        (ok, ret) = p.call(abi.encodeWithSignature("addrCount(address[])", new address[](0)));
+        assertTrue(ok, "addrCount on empty reverted");
+        assertEq(abi.decode(ret, (uint256)), 0);
+    }
+
+    /// calldata(array(memory(bytes))): dynamic elements round-trip through the
+    /// offset table. One element is a realistic 65-byte r||s||v signature (the
+    /// ticketSigs/presenceSigs wire shape) so the multi-word tail - length
+    /// rounding plus a copy spanning three words - is exercised, not just
+    /// sub-word tails. Bounds and the empty array are probed on this path too.
+    function test_probe_calldataBytesArray() public {
+        (uint8 v, bytes32 r, bytes32 s) = vm.sign(0xA11CE, keccak256("sig-shaped element"));
+        bytes[] memory arr = new bytes[](2);
+        arr[0] = abi.encodePacked(r, s, v);
+        arr[1] = hex"ccddee";
+        assertEq(arr[0].length, 65, "signature element must span multiple words");
+
+        (bool ok, bytes memory ret) =
+            p.call(abi.encodeWithSignature("bytesCount(bytes[])", arr));
+        assertTrue(ok, "bytesCount reverted");
+        assertEq(abi.decode(ret, (uint256)), 2);
+
+        (ok, ret) = p.call(abi.encodeWithSignature("bytesAt(bytes[],uint256)", arr, 0));
+        assertTrue(ok, "bytesAt(0) reverted");
+        assertEq(abi.decode(ret, (bytes)), arr[0]);
+
+        (ok, ret) = p.call(abi.encodeWithSignature("bytesAt(bytes[],uint256)", arr, 1));
+        assertTrue(ok, "bytesAt(1) reverted");
+        assertEq(abi.decode(ret, (bytes)), arr[1]);
+
+        (ok, ret) = p.call(abi.encodeWithSignature("bytesAt(bytes[],uint256)", arr, 2));
+        assertFalse(ok, "out-of-range index did not revert");
+        assertEq(ret, abi.encodeWithSelector(OOB_SEL), "wrong revert payload");
+
+        (ok, ret) = p.call(abi.encodeWithSignature("bytesCount(bytes[])", new bytes[](0)));
+        assertTrue(ok, "bytesCount on empty reverted");
+        assertEq(abi.decode(ret, (uint256)), 0);
+    }
+
+    /// calldata(array(uint256)): no upstream fixture exists for uint256
+    /// element decoding - this canary is the coverage. Indexing, bounds, and
+    /// a full iteration (sum).
+    function test_probe_calldataUintArray() public {
+        uint256[] memory arr = new uint256[](3);
+        arr[0] = 7;
+        arr[1] = 35;
+        arr[2] = 100;
+
+        (bool ok, bytes memory ret) =
+            p.call(abi.encodeWithSignature("uintAt(uint256[],uint256)", arr, 2));
+        assertTrue(ok, "uintAt reverted");
+        assertEq(abi.decode(ret, (uint256)), 100);
+
+        (ok, ret) = p.call(abi.encodeWithSignature("uintAt(uint256[],uint256)", arr, 3));
+        assertFalse(ok, "out-of-range index did not revert");
+        assertEq(ret, abi.encodeWithSelector(OOB_SEL), "wrong revert payload");
+
+        (ok, ret) = p.call(abi.encodeWithSignature("sumOf(uint256[])", arr));
+        assertTrue(ok, "sumOf reverted");
+        assertEq(abi.decode(ret, (uint256)), 142, "iteration sum mismatch");
     }
 }
