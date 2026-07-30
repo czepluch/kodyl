@@ -44,6 +44,24 @@
   },
   {
     "type": "function",
+    "name": "addOperator",
+    "inputs": [
+      {
+        "name": "eid",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "operator",
+        "type": "address",
+        "internalType": "address"
+      }
+    ],
+    "outputs": [],
+    "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
     "name": "attendees",
     "inputs": [
       {
@@ -142,6 +160,72 @@
         "name": "attendees",
         "type": "address[]",
         "internalType": "address[]"
+      }
+    ],
+    "outputs": [],
+    "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
+    "name": "checkInBatchWithProofs",
+    "inputs": [
+      {
+        "name": "eid",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "attendees",
+        "type": "address[]",
+        "internalType": "address[]"
+      },
+      {
+        "name": "validUntils",
+        "type": "uint256[]",
+        "internalType": "uint256[]"
+      },
+      {
+        "name": "ticketSigs",
+        "type": "bytes[]",
+        "internalType": "bytes[]"
+      },
+      {
+        "name": "presenceSigs",
+        "type": "bytes[]",
+        "internalType": "bytes[]"
+      }
+    ],
+    "outputs": [],
+    "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
+    "name": "checkInWithProof",
+    "inputs": [
+      {
+        "name": "eid",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "attendee",
+        "type": "address",
+        "internalType": "address"
+      },
+      {
+        "name": "validUntil",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "ticketSig",
+        "type": "bytes",
+        "internalType": "bytes"
+      },
+      {
+        "name": "presenceSig",
+        "type": "bytes",
+        "internalType": "bytes"
       }
     ],
     "outputs": [],
@@ -375,6 +459,30 @@
   },
   {
     "type": "function",
+    "name": "isOperator",
+    "inputs": [
+      {
+        "name": "eid",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "operator",
+        "type": "address",
+        "internalType": "address"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "",
+        "type": "bool",
+        "internalType": "bool"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
     "name": "maintainer",
     "inputs": [],
     "outputs": [
@@ -455,6 +563,24 @@
       }
     ],
     "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "removeOperator",
+    "inputs": [
+      {
+        "name": "eid",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "operator",
+        "type": "address",
+        "internalType": "address"
+      }
+    ],
+    "outputs": [],
+    "stateMutability": "nonpayable"
   },
   {
     "type": "function",
@@ -678,6 +804,31 @@
   },
   {
     "type": "event",
+    "name": "OperatorSet",
+    "inputs": [
+      {
+        "name": "eventId",
+        "type": "uint256",
+        "indexed": true,
+        "internalType": "uint256"
+      },
+      {
+        "name": "operator",
+        "type": "address",
+        "indexed": true,
+        "internalType": "address"
+      },
+      {
+        "name": "enabled",
+        "type": "bool",
+        "indexed": false,
+        "internalType": "bool"
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
     "name": "RefundClaimed",
     "inputs": [
       {
@@ -746,6 +897,11 @@
   },
   {
     "type": "error",
+    "name": "ArrayOutOfBounds",
+    "inputs": []
+  },
+  {
+    "type": "error",
     "name": "BatchTooLarge",
     "inputs": [
       {
@@ -778,6 +934,16 @@
   {
     "type": "error",
     "name": "DustNotClaimable",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "ECRecoverCallFailed",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "ECRecoverFailed",
     "inputs": []
   },
   {
@@ -845,6 +1011,16 @@
   },
   {
     "type": "error",
+    "name": "InvalidSignatureLength",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "MalleableSignatureRejected",
+    "inputs": []
+  },
+  {
+    "type": "error",
     "name": "NonPayableReceivedValue",
     "inputs": []
   },
@@ -870,7 +1046,27 @@
   },
   {
     "type": "error",
+    "name": "PresenceSignerUnauthorized",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "ProofArrayMismatch",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "ProofExpired",
+    "inputs": []
+  },
+  {
+    "type": "error",
     "name": "RegistrationClosed",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "TicketSignerMismatch",
     "inputs": []
   },
   {

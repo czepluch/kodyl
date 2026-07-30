@@ -22,6 +22,7 @@ interface KodylAbi {
     event MetadataUpdated(uint256 indexed eventId, string newURI);
     event DustClaimed(uint256 indexed eventId, address indexed recipient, uint256 amount);
     event MaintainerUpdated(address indexed oldMaintainer, address indexed newMaintainer);
+    event OperatorSet(uint256 indexed eventId, address indexed operator, bool enabled);
 
     // ---- errors (hand-rolled selectors via keccakLit in Kodyl.solc) ----
     error EventNotFound();
@@ -42,6 +43,18 @@ interface KodylAbi {
     error DustNotClaimable();
     error PayoutSwept();
     error InvalidEventParameters(string reason);
+    /// @dev Ticket signature does not recover to the claimed attendee.
+    error TicketSignerMismatch();
+    /// @dev Presence signature recovers to neither the organizer nor an
+    ///      authorized operator of the event.
+    error PresenceSignerUnauthorized();
+    /// @dev The proof's validUntil lies in the past (t == validUntil still
+    ///      submits; the boundary is inclusive).
+    error ProofExpired();
+    /// @dev A signature parameter is not exactly 65 bytes (r || s || v).
+    error InvalidSignatureLength();
+    /// @dev checkInBatchWithProofs array arguments differ in length.
+    error ProofArrayMismatch();
 
     // ---- errors (std dispatcher / decoder, not declared in Kodyl.solc) ----
     /// @dev Value sent to a non-payable public function. Originates in the std
@@ -54,6 +67,22 @@ interface KodylAbi {
     ///      path, and the hand-decoded checkInBatch enforces the same check.
     ///      Selector 0x7cc04fa7.
     error DirtyHigherBitsForAddress();
+    /// @dev std ecrecover rejects s above the curve-order midpoint before
+    ///      calling the precompile. Selector 0x25260b20.
+    error MalleableSignatureRejected();
+    /// @dev std ecrecover: the precompile succeeded but recovered no signer
+    ///      (invalid signature). Never returns the zero address. Selector
+    ///      0x4fbfae63.
+    error ECRecoverFailed();
+    /// @dev std ecrecover: the precompile staticcall itself failed. Declared
+    ///      for ABI completeness; unobservable in practice - the only failure
+    ///      mode is gas starvation, which leaves too little gas to fund this
+    ///      revert (pinned by CoreProbe.t.sol). Selector 0x578763f7.
+    error ECRecoverCallFailed();
+    /// @dev Out-of-range index into a lazily decoded calldata array. Raised
+    ///      by the std decoder, not reachable through the checked entry
+    ///      points (which iterate within bounds). Selector 0x7f52b2bf.
+    error ArrayOutOfBounds();
 
     // ---- write functions ----
     /// @return eventId the sequential id assigned to the new event
@@ -73,6 +102,33 @@ interface KodylAbi {
     function checkIn(uint256 eid, address attendee) external;
     /// @dev Fallback-dispatched in the contract, but a standard call from a client.
     function checkInBatch(uint256 eid, address[] calldata attendees) external;
+    /// @dev Proof-based check-in: anyone may submit an attendee-signed Ticket
+    ///      plus an organizer/operator-signed Presence within its validUntil
+    ///      window. Signatures are 65-byte r || s || v (EIP-712, domain
+    ///      name "Kodyl" version "1").
+    function checkInWithProof(
+        uint256 eid,
+        address attendee,
+        uint256 validUntil,
+        bytes calldata ticketSig,
+        bytes calldata presenceSig
+    ) external;
+    /// @dev Batch form. Signature/authorization/expiry failures revert the
+    ///      whole batch; status-based skips (already checked in, not
+    ///      registered) are silent no-ops, mirroring checkInBatch.
+    function checkInBatchWithProofs(
+        uint256 eid,
+        address[] calldata attendees,
+        uint256[] calldata validUntils,
+        bytes[] calldata ticketSigs,
+        bytes[] calldata presenceSigs
+    ) external;
+    /// @dev Organizer-only. Operators countersign Presence proofs with the
+    ///      same authority as the organizer. An add/remove pair instead of
+    ///      setOperator(eid, operator, bool): the toolchain's std has no
+    ///      calldata decoder for bool parameters.
+    function addOperator(uint256 eid, address operator) external;
+    function removeOperator(uint256 eid, address operator) external;
     function cancelEvent(uint256 eid) external;
     function setMetadataURI(uint256 eid, string calldata uri) external;
     function claimDust(uint256 eid) external;
@@ -100,6 +156,9 @@ interface KodylAbi {
     function attendees(uint256 eid, address attendee) external view returns (uint256);
     function metadataURI(uint256 eid) external view returns (string memory);
     function cancelled(uint256 eid) external view returns (bool);
+    /// @dev Zero-tier like the stat getters: false for unknown events and
+    ///      unknown addresses alike.
+    function isOperator(uint256 eid, address operator) external view returns (bool);
     function registeredCount(uint256 eid) external view returns (uint256);
     function checkedInCount(uint256 eid) external view returns (uint256);
     function claimedCount(uint256 eid) external view returns (uint256);

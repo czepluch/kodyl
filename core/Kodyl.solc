@@ -17,10 +17,12 @@
 // balance above the ledger and cannot be rejected, so == would let 1 wei
 // permanently brick every flow. The surplus is simply unowned and stuck.
 import std.{*};
-import std.opcodes.{callvalue as callvalue_, shr, calldatasize, calldataload};
+import std.opcodes.{callvalue as callvalue_, shr, mload, calldatasize, calldataload};
+import std.{frombool};
 import std.dispatch.{*};
 import std.Generic.{*};
 import std.StorageGeneric.{*};
+import std.eip712.{*};
 import lib.kodyl.{*};
 
 // --- ADTs ---
@@ -124,6 +126,61 @@ function onlyOrganizerOf(org : address) -> () {
     requireK(caller() == org, "NotOrganizer()");
 }
 
+// --- EIP-712 hashing (proof-based check-in) ---
+// The two message structs are hashed by hand - std has no hashStruct helper:
+// keccak256(typeHash ++ one 32-byte word per member), the typeHash folded at
+// compile time. The type strings are the wire contract with off-chain
+// signers: test/Kodyl.t.sol pins them (TICKET_TYPEHASH / PRESENCE_TYPEHASH)
+// with an independent keccak, and the phase 3 frontend signer must match the
+// same strings byte-for-byte.
+
+// The attendee address is deliberately NOT in the Ticket payload: ecrecover
+// yields the signer, and verifyProof requires it to equal the attendee
+// argument - the signature itself is the address binding.
+function hashTicket(eid : uint256) -> bytes32 {
+    let typeHash = bytes32(keccakLit("Ticket(uint256 eventId)"));
+    return keccak256_(concat(typeHash, bytes32(Typedef.rep(eid))));
+}
+
+function hashPresence(eid : uint256, attendee : address, validUntil : uint256) -> bytes32 {
+    let typeHash = bytes32(
+        keccakLit("Presence(uint256 eventId,address attendee,uint256 validUntil)"));
+    return keccak256_(concat(
+        typeHash,
+        concat(bytes32(Typedef.rep(eid)),
+               concat(bytes32(Typedef.rep(attendee)), bytes32(Typedef.rep(validUntil))))
+    ));
+}
+
+// Domain separator: name "Kodyl", version "1", the runtime chain id, this
+// contract. Computed per call (caching in storage is a later optimization,
+// not v2); binds every proof to one deployment on one chain.
+function domainSep() -> bytes32 {
+    return eip712DomainSeparator(
+        bytes32(keccakLit("Kodyl")), bytes32(keccakLit("1")), chainId(), self());
+}
+
+// A split 65-byte r||s||v signature. A product ADT rather than a tuple
+// return (no tuple destructuring at let in the language), matched by
+// consumers - the Counters idiom. Defined HERE and not in lib.kodyl:
+// pattern-matching a constructor imported from another module fails SC0107
+// at the current pin, so the ADT lives with its match sites.
+data Sig = Sig(bytes32, bytes32, uint256);
+
+// Splits the 65-byte r||s||v wire format that signTypedData produces. v is
+// the raw recovery byte (27/28), passed through as uint256 - std ecrecover
+// takes uint256 and rejects invalid values itself.
+function splitSig(sig : memory(bytes)) -> Sig {
+    let p = Typedef.rep(sig);
+    requireK(mload(p) == 65, "InvalidSignatureLength()");
+    let r = bytes32(mload(p + 32));
+    let s = bytes32(mload(p + 64));
+    // Byte 64 of the payload (p + 32 + 64), taken as the top byte of its
+    // word; the shift leaves exactly the 8 v bits.
+    let v = shr(248, mload(p + 96));
+    return Sig(r, s, uint256(v));
+}
+
 contract Kodyl {
     maintainer : address;
     eventCount : uint256;
@@ -143,6 +200,9 @@ contract Kodyl {
     // pot: deposits in, refunds/payouts/dust out. Makes dust exact per event
     // instead of relying on the (shared) contract balance.
     countersM : mapping(uint256, Counters);
+    // Door operators authorized to countersign Presence proofs, per event.
+    // The zero slot reads false (not operator) - the zero-pattern rule.
+    operatorsM : mapping(uint256, mapping(address, bool));
 
     constructor(maintainer_ : address) {
         // The ONE surviving packed-word reason ("Zero address"): string
@@ -415,6 +475,131 @@ contract Kodyl {
             onlyOrganizerOf(org);
             requireCheckInOpen(cancelledM[eid], start, end_, dispute);
             bumpCheckedIn(eid, checkInInner(eid, a));
+        }
+    }
+
+    // --- operators (proof-based check-in) ---
+    // An operator holds the same check-in attestation authority as the
+    // organizer; appointing one is a trust decision. An add/remove PAIR of
+    // public functions instead of setOperator(eid, operator, enabled): std
+    // has no calldata decoder for a bool parameter (bool returns encode
+    // fine), so a bool cannot appear in a typed public signature at the
+    // current pin. Only the public boundary is doubled - the guard, write,
+    // and event share one internal body, which takes the bool the wire could
+    // not (internal bool params work; frombool encodes it for the event).
+
+    function setOperatorInner(eid : uint256, operator : address, enabled : bool) -> () {
+        match eventsRec[eid] {
+        | EventRec.NoEvent => revertNotFound();
+        | EventRec.Ev(org, dep, deadline, start, end_, dispute, cap) =>
+            onlyOrganizerOf(org);
+            operatorsM[eid][operator] = enabled;
+            emitLog3W1(keccakLit("OperatorSet(uint256,address,bool)"),
+                       Typedef.rep(eid), Typedef.rep(operator), frombool(enabled));
+        }
+    }
+
+    public function addOperator(eid : uint256, operator : address) -> () {
+        setOperatorInner(eid, operator, true);
+    }
+
+    public function removeOperator(eid : uint256, operator : address) -> () {
+        setOperatorInner(eid, operator, false);
+    }
+
+    // Raw-mapping getter, zero-tier like the stat getters: false for unknown
+    // events and unknown addresses alike.
+    public function isOperator(eid : uint256, a : address) -> bool {
+        return operatorsM[eid][a];
+    }
+
+    // --- proof-based check-in ---
+    // Two EIP-712 signatures replace the organizer transaction: a Ticket
+    // signed by the attendee (timeless consent) and a Presence countersigned
+    // at the door by the organizer or an operator (carries the settlement
+    // window). ANYONE may submit the pair within the window - a relayer, the
+    // door device once it regains signal, or the attendee themselves.
+
+    // One Ticket + Presence pair. Reverts on anything cryptographically or
+    // temporally wrong; whether the attendee's status allows the flip is the
+    // caller's concern (checkInInner skips silently). recoverStrict returns a
+    // real signer or reverts (MalleableSignatureRejected / ECRecoverFailed) -
+    // never a stale scratch word - so no comparison here sees garbage. The
+    // domain separator is passed in so a batch hashes it once.
+    function verifyProof(eid : uint256, org : address, dom : bytes32,
+                         attendee : address, validUntil : uint256,
+                         ticketSig : memory(bytes), presenceSig : memory(bytes)) -> () {
+        // Inclusive boundary, consistent with the deadline convention:
+        // t == validUntil still submits.
+        requireK(timeNow() <= validUntil, "ProofExpired()");
+        match splitSig(ticketSig) {
+        | Sig(r, s, v) =>
+            requireK(recoverStrict(eip712Digest(dom, hashTicket(eid)), v, r, s) == attendee,
+                     "TicketSignerMismatch()");
+        }
+        match splitSig(presenceSig) {
+        | Sig(r, s, v) =>
+            let signer =
+                recoverStrict(eip712Digest(dom, hashPresence(eid, attendee, validUntil)), v, r, s);
+            // No short-circuit in the language - both operands always
+            // evaluate; both are pure reads, so the fold is safe.
+            requireK(signer == org || operatorsM[eid][signer],
+                     "PresenceSignerUnauthorized()");
+        }
+    }
+
+    public function checkInWithProof(eid : uint256, attendee : address, validUntil : uint256,
+                                     ticketSig : memory(bytes), presenceSig : memory(bytes)) -> () {
+        match eventsRec[eid] {
+        | EventRec.NoEvent => revertNotFound();
+        | EventRec.Ev(org, dep, deadline, start, end_, dispute, cap) =>
+            requireCheckInOpen(cancelledM[eid], start, end_, dispute);
+            verifyProof(eid, org, domainSep(), attendee, validUntil, ticketSig, presenceSig);
+            bumpCheckedIn(eid, checkInInner(eid, attendee));
+        }
+    }
+
+    // Batch semantics mirror checkInBatch: STATUS-based skips are silent
+    // no-ops (already checked in / not registered), but a bad signature,
+    // unauthorized presence signer, or expired proof REVERTS the whole batch
+    // - that is a malformed submission, not benign state drift. The typed
+    // calldata-array parameters decode lazily (the post-1950e707 path); the
+    // hand-decoded checkInBatch fallback shows what this required before.
+    // The first array is NOT named attendees: a parameter sharing a public
+    // function's name (the attendees getter) resolves against the function in
+    // the term namespace, degrading the parameter's type to an unsolved
+    // variable (SC0223 "cannot entail ... RValueIdxAccess").
+    public function checkInBatchWithProofs(
+        eid : uint256,
+        toCheck : calldata(array(address)),
+        validUntils : calldata(array(uint256)),
+        ticketSigs : calldata(array(memory(bytes))),
+        presenceSigs : calldata(array(memory(bytes)))
+    ) -> () {
+        match eventsRec[eid] {
+        | EventRec.NoEvent => revertNotFound();
+        | EventRec.Ev(org, dep, deadline, start, end_, dispute, cap) =>
+            requireCheckInOpen(cancelledM[eid], start, end_, dispute);
+            let n = toCheck.length();
+            requireK(validUntils.length() == n, "ProofArrayMismatch()");
+            requireK(ticketSigs.length() == n, "ProofArrayMismatch()");
+            requireK(presenceSigs.length() == n, "ProofArrayMismatch()");
+            if (n > maxBatchSize()) {
+                revertWith2("BatchTooLarge(uint256,uint256)",
+                            Typedef.rep(n), Typedef.rep(maxBatchSize()));
+            }
+            let dom = domainSep();
+            let flips = uint256(0);
+            for (let i = uint256(0); i < n; i = i + 1) {
+                // Bind the element once: calldata indexing re-runs the bounds
+                // check and address decode each time, so toCheck[i] twice is
+                // wasted work.
+                let who = toCheck[i];
+                verifyProof(eid, org, dom, who, validUntils[i],
+                            ticketSigs[i], presenceSigs[i]);
+                flips = flips + checkInInner(eid, who);
+            }
+            bumpCheckedIn(eid, flips);
         }
     }
 

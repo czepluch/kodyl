@@ -6,7 +6,8 @@
 import std.{*};
 import std.opcodes.{caller as caller_, callvalue as callvalue_, timestamp, selfbalance,
                     gas, call, shr, mload, mstore, revert as revert_,
-                    log1 as log1_, log2 as log2_, log3 as log3_};
+                    log1 as log1_, log2 as log2_, log3 as log3_,
+                    chainid as chainid_, address as address_};
 
 export {
     ErrSel,
@@ -16,6 +17,9 @@ export {
     caller_value,
     timeNow,
     balanceSelf,
+    chainId,
+    self,
+    recoverStrict,
     panic,
     solAssert,
     addCk,
@@ -105,6 +109,35 @@ function timeNow() -> uint256 {
 function balanceSelf() -> uint256 {
     return uint256(selfbalance());
 }
+
+function chainId() -> uint256 {
+    return uint256(chainid_());
+}
+
+function self() -> address {
+    return address(address_());
+}
+
+// ecrecover with the scratch slot zeroed first. std ecrecover reads its
+// result from scratch [0, 32) but does NOT pre-zero it, and the precompile
+// writes NOTHING on an invalid recovery (v outside {27, 28}, or an r/s that
+// recovers no point - the malleability guard only screens s). The EVM leaves
+// the return region untouched, so std ecrecover would read back a stale
+// scratch word as the "signer" instead of reverting ECRecoverFailed. Zeroing
+// [0, 32) first turns every invalid recovery into the intended revert. The
+// std ecrecover call still enforces low-s and the nonzero-result check.
+// Upstream std defect (solc's own ecrecover pre-zeroes the buffer); mirrored
+// here as a shim until it lands upstream.
+function recoverStrict(digest : bytes32, v : uint256, r : bytes32, s : bytes32) -> address {
+    mstore(0, 0);
+    return ecrecover(digest, v, r, s);
+}
+
+// NOTE: the split-signature helper (data Sig + splitSig) lives in Kodyl.solc,
+// not here, although this module is its natural home: pattern-matching a
+// constructor IMPORTED from another module fails SC0107 "invalid pattern
+// syntax" at the current pin (construction and same-module matches are fine),
+// so the ADT must live in the module that matches on it.
 
 // --- Solidity 0.8 semantics shims ---
 // Core Solidity arithmetic wraps and its assert hits the invalid opcode, so
