@@ -42,12 +42,26 @@ singleton:
   the balance above the ledger and cannot be rejected (see the Security
   review section). A side benefit: per-event dust is exact - `claimDust`
   pays out the pot, not a balance reading.
+- Proof-based check-in rides on the std's EIP-712 helpers (`std/eip712.solc`,
+  the argotorg pin). Two hand-rolled struct hashes (`Ticket(uint256 eventId)`,
+  `Presence(uint256 eventId,address attendee,uint256 validUntil)`) built with
+  `concat`/`keccak256_` - there is no `hashStruct` helper - feed the 0x1901
+  digest, then split-form `ecrecover` recovers each signer. Both
+  `checkInWithProof` and `checkInBatchWithProofs` share one internal
+  `verifyProof`, and `ecrecover` goes through a `recoverStrict` shim that
+  zeroes the scratch slot first (std's `ecrecover` reads its result from
+  scratch without pre-zeroing, so an invalid recovery would otherwise return
+  a stale word instead of reverting - see the Security review section).
+  Door operators are a nested-mapping set, `mapping(uint256, mapping(address,
+  bool))`, gated organizer-only, with an `addOperator`/`removeOperator` pair
+  standing in for `setOperator(eid, operator, bool)` because the toolchain has
+  no `bool` calldata decoder yet.
 
 ## Layout
 
 | File | Role |
 |---|---|
-| `Kodyl.solc` | The whole protocol: one contract, 28 entry points (27 typed public functions plus `checkInBatch` through the payable fallback) |
+| `Kodyl.solc` | The whole protocol: one contract, 33 entry points (32 typed public functions plus `checkInBatch` through the payable fallback) |
 | `kodyl.solc` | Shared module (`import lib.kodyl.{*}`): infrastructure the language does not provide yet - checked-math shims, revert/event builders, env wrappers, validation |
 | `Probe.solc` | Toolchain canary: minimal contract proving the pipeline end to end |
 | `build/` | Pipeline output; the deployable `.hex`, generated `.yul`, and `TOOLCHAIN` stamp are committed (so `forge test` works without the toolchain), `.hull`/`.abi` intermediates stay local |
@@ -60,7 +74,7 @@ Build and test:
 forge test                       # forge is a harness only (see foundry.toml)
 ```
 
-`test/Kodyl.t.sol` (59 scenarios) and `test/KodylInvariant.t.sol` (128k-call
+`test/Kodyl.t.sol` (84 scenarios) and `test/KodylInvariant.t.sol` (128k-call
 ledger fuzz across three concurrent events), plus `test/KodylAccounting.t.sol`
 and `test/KodylConservation.t.sol` (reentrancy + full-lifecycle conservation),
 drive the compiled bytecode through a typed Solidity interface inside forge -
@@ -143,11 +157,13 @@ declaration order:
 | 5 | `cancelledM` | `mapping(uint256, bool)` |
 | 6 | `statusM` | `mapping(uint256, mapping(address, AttendeeStatus))` |
 | 7 | `countersM` | `mapping(uint256, Counters)` |
+| 8 | `operatorsM` | `mapping(uint256, mapping(address, bool))` |
 
 A mapping value lives at `keccak256(slot ++ key)` - note the argument order,
 which is **reversed** from classic Solidity's `keccak256(key ++ slot)`.
 Nested mappings iterate the rule: a `statusM` entry sits at
-`keccak256(keccak256(6 ++ eid) ++ attendee)`. Dynamic arrays and strings
+`keccak256(keccak256(6 ++ eid) ++ attendee)`, and an `operatorsM` entry at
+`keccak256(keccak256(8 ++ eid) ++ operator)`. Dynamic arrays and strings
 match classic Solidity exactly: array length at slot `p`, element `i` at
 `keccak256(p) + i`, strings in the usual short/long form.
 
@@ -264,3 +280,19 @@ invariant handler became phase-aware (claim/check-in/dust paths now succeed
 hundreds of times per 128k-call campaign instead of single digits), and the
 fuzz runs under a forced-ETH regime asserting the tight ledger form
 `balance == totalHeld + forced ETH`.
+
+A third round covered the proof-based check-in (v2), again multi-agent with
+adversarial verification. The one finding worth recording here is a **latent
+std defect**: `std/eip712.solc`'s neighbour `ecrecover` (in `std/std.solc`)
+reads its result from scratch memory `[0, 32)` but never pre-zeroes it, and
+the precompile writes nothing on an invalid recovery (a `v` outside `{27, 28}`
+or an unrecoverable `r`/`s`, past the s-only malleability guard). The EVM
+leaves the return region untouched, so a stale scratch word would be returned
+as a bogus signer instead of reverting `ECRecoverFailed`. It was **not
+exploitable in Kodyl** (the stale value can never equal a registered attendee
+on the ticket check, and on the presence check it can only equal the attendee,
+who would have to be the organizer/operator anyway), but the guarantee was
+one refactor away from breaking, so `verifyProof` routes every recovery
+through `recoverStrict` (`mstore(0, 0)` then `ecrecover`), which forces the
+intended revert. Regression-pinned by `test_proofCheckIn_invalidRecoveryDoesNotReturnStaleSigner`
+(mutation-verified: raw `ecrecover` fails it) and reported upstream.

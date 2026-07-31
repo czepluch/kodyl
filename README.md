@@ -41,6 +41,7 @@ how every mechanic in [`spec.md`](./spec.md) maps to a test.
 | `deployments/` | committed per-network deployment records (see `deployments/README.md`, `VERIFICATION.md`) |
 | `test/` | a **Foundry harness** (Solidity) that deploys the compiled Core bytecode and drives it - the tests are how the port is verified |
 | `frontend/` | a React + viem demo dApp (see `frontend/README.md`) |
+| `mailbox/` | a zero-dependency Node relay for proof-based check-in vouchers (see `mailbox/README.md`) |
 | `spec.md` | the language-agnostic protocol specification |
 
 ## Toolchain
@@ -75,7 +76,27 @@ into `core/build/TOOLCHAIN`. CI re-proves on every core change that the
 committed artifacts are byte-identical to a from-source rebuild at the pinned
 rev - see [`VERIFICATION.md`](./VERIFICATION.md) for the third-party recipe.
 
-For the demo dApp against a local anvil node, see [`frontend/README.md`](./frontend/README.md).
+## Demo (local anvil)
+
+The full demo, including proof-based check-in, runs in three terminals:
+
+```shell
+# 1) a local node
+anvil
+
+# 2) deploy + seed, then serve the dApp
+./scripts/deploy-anvil.sh && ./scripts/seed-anvil.sh
+cd frontend && npm install && npm run dev
+
+# 3) the voucher relay for proof-based check-in
+node mailbox/server.mjs        # http://localhost:8787 (PORT to override)
+```
+
+The mailbox is optional: without it, the door's operator outbox and direct
+on-chain submission still work; it only carries a signed `Presence` to a
+stranded attendee for self-rescue. See [`mailbox/README.md`](./mailbox/README.md)
+for the API and the trust model, and [`frontend/README.md`](./frontend/README.md)
+for the dApp.
 
 ## Measured
 

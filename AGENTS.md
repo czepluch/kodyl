@@ -20,12 +20,30 @@ and matched on. Per-event tallies live in one positional product value
 the event id. Custody is shared: one contract balance, tracked by a per-event
 pot (the `held` field of `Counters`) and a global ledger (`totalHeld`).
 
+Check-in has two paths. The **direct** path (`checkIn`, `checkInBatch`) is an
+organizer transaction. The **proof-based** path (v2) decouples the door from
+the write: an attendee signs an EIP-712 `Ticket(uint256 eventId)`, the
+organizer or an authorized operator signs `Presence(uint256 eventId,address
+attendee,uint256 validUntil)`, and anyone submits the pair via
+`checkInWithProof` / `checkInBatchWithProofs` within the `validUntil` window.
+Operators are a nested-mapping set (slot 8), organizer-only, managed by
+`addOperator`/`removeOperator` (a pair, not `setOperator(...,bool)` - no `bool`
+calldata decoder) and read by `isOperator`. Signature recovery goes through
+`recoverStrict` in `lib.kodyl` (zeroes scratch before `ecrecover`; see its
+comment). The `mailbox/` service is a zero-dependency relay that carries the
+operator's signed `Presence` to a stranded attendee for self-rescue - trust-free,
+since the contract verifies both signatures.
+
 Core files:
 - `core/Kodyl.solc` - the contract.
 - `core/kodyl.solc` - shared module (`import lib.kodyl.{*}`): checked-math
-  shims, revert/event builders, env wrappers, validation. This is the
-  "infrastructure the language doesn't have yet" layer.
+  shims, revert/event builders, env wrappers, validation, EIP-712 env
+  wrappers (`chainId`/`self`), and `recoverStrict`. This is the
+  "infrastructure the language doesn't have yet" layer. (The `Sig` split +
+  `splitSig` live in `Kodyl.solc`, not here: matching a constructor imported
+  from another module fails `SC0107`, so the ADT lives with its match sites.)
 - `core/Probe.solc` - toolchain canary.
+- `mailbox/server.mjs` - the voucher relay (plain Node, no deps).
 - `test/*.sol` - Foundry harness (deploys the compiled bytecode, drives it).
 - `test/KodylAbi.sol` - hand-authored interface; `forge inspect` on it produces
   the complete ABI (the compiler emits functions only, not events/errors).

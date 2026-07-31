@@ -52,21 +52,59 @@ From the repo root, with the Foundry toolchain on PATH:
 anvil                                      # local node (leave running)
 ./scripts/deploy-anvil.sh                  # deploy; writes src/deployment.json
 ./scripts/seed-anvil.sh                    # a couple of demo events
+node mailbox/server.mjs                     # voucher relay for proof check-in (leave running)
 cd frontend && npm install && npm run dev  # http://localhost:5173
 ```
+
+The mailbox is optional (its URL is `VITE_MAILBOX_URL`, default
+`http://localhost:8787`): without it the door's outbox and direct submission
+still work, only attendee self-rescue needs it.
+
+## Proof-based check-in (tickets, door, self-rescue)
+
+The door is decoupled from the on-chain write by two EIP-712 signatures (see
+`spec.md` for the protocol). The click-path, all on local anvil:
+
+1. **Attendee** (demo account 1): register for an event, then **Show ticket** -
+   signs a `Ticket` once (cached in `localStorage`) and renders it as a QR code
+   and copyable JSON.
+2. **Organizer** (account 0): on the event page, open the check-in **Door** tab,
+   **Scan** the QR (or paste the JSON). The app verifies the ticket signer with
+   `recoverTypedDataAddress` and the roster status, then you **countersign**
+   `Presence` (valid 24 h). **Submit N on-chain** sends `checkInWithProof` (one)
+   or `checkInBatchWithProofs` (several); the roster flips to CheckedIn.
+3. **Self-rescue**: if the door countersigned but never submitted, the attendee
+   sees **Finalize check-in** (the voucher arrived via the mailbox) and submits
+   it themselves. Fast-forward past the 24 h window and the UI marks the proof
+   expired client-side: the self-rescue button disables with "Check-in proof
+   expired", and the Door flags such pending vouchers as expired and excludes
+   them from a batch. (The contract's own `ProofExpired` revert, decoded by the
+   FRIENDLY error map, is the backstop if an expired proof is submitted anyway.)
+
+The on-chain and mailbox layers of this flow are covered by an automated check,
+`scripts/verify-proof-e2e.mjs`: viem signs with the exact `eip712.ts`
+domain/types and the deployed contract accepts the pair (relayer-submitted and
+operator-signed batch), rejects wrong-signer / wrong-domain / expired, and the
+mailbox roundtrips. Run it from `frontend/` against a running anvil + deploy
+(and optionally the mailbox): `node scripts/verify-proof-e2e.mjs`. The UI
+click-path above is the manual half.
 
 ## Structure
 
 | File | Role |
 |---|---|
-| `config.ts` | chain, clients, anvil dev accounts, ABI, label tables |
-| `session.ts` | identity + signing (demo / wallet), `sendTx` |
+| `config.ts` | chain, clients, anvil dev accounts, ABI, label tables, `MAILBOX_URL` |
+| `session.ts` | identity + signing (demo / wallet), `sendTx`, `signTypedData` |
+| `eip712.ts` | EIP-712 domain + Ticket/Presence type objects (byte-match the contract) |
+| `outbox.ts` | `localStorage` ticket cache + operator outbox |
+| `mailbox.ts` | voucher relay client (`postVoucher` / `fetchVoucher`) |
+| `qr.tsx` | QR generation (`qrcode`) and camera scanning (`jsqr`) |
 | `useKodyl.ts` | per-event state via a viem public client, block-watched |
 | `logs.ts` | roster + activity reconstructed from event logs |
 | `metadata.ts` | `EventMeta`, `encodeMetadata`, `resolveMetadata` |
 | `router.ts` | tiny hash router |
 | `ctx.ts` | shared app context (data + tx runner) |
-| `components.tsx` | nav, identity bar, event card/actions, demo drawer |
+| `components.tsx` | nav, identity bar, event card/actions, ticket + Door + self-rescue, demo drawer |
 | `views.tsx` | Discover / Event / My tickets / Organize |
 | `App.tsx` | shell: providers, layout, route switch, activity feed |
 

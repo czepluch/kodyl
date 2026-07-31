@@ -66,10 +66,15 @@ The direction is `>=`, not `==`: forced ETH (selfdestruct, block-reward payments
 
 **Organizer** (per-event, permissionless)
 - Whoever calls `createEvent` is the organizer of that event - there is no global admin
-- Checks in attendees (single or batch)
+- Checks in attendees (single or batch), or signs `Presence` for the proof-based path
+- Authorizes and revokes door operators (`addOperator`/`removeOperator`)
 - Can cancel the event before it starts (entitles all registered attendees to refunds)
 - Can approve late check-ins during the dispute period
 - Can update the event's metadata URI at any time
+
+**Operator** (per-event, appointed by the organizer)
+- Authorized on-chain per event via `addOperator`; revocable via `removeOperator`
+- Can sign a valid `Presence` attestation - the **same check-in authority as the organizer**, and nothing more (cannot cancel, change parameters, or move funds)
 
 **Attendee**
 - Registers with the exact deposit
@@ -238,6 +243,79 @@ Check-ins are valid from `eventStart` through `eventEnd + disputePeriod` (both e
 
 The gate is the derived state, not a raw time window: a cancelled event is never in `Active` or `Dispute`, so **check-ins on a cancelled event always revert**. (Otherwise an attendee could be flipped to `CheckedIn` after cancellation and lose the refund path.)
 
+### Proof-based Check-in (v2)
+
+The direct methods above need the organizer online at the door: a transaction per
+scan, gas and signal at the venue, and nothing settles if the organizer never
+submits. The proof-based path decouples the physical check-in from the on-chain
+write with **two EIP-712 signatures**, so anyone can submit the pair later.
+
+**The two messages** (type strings verbatim - the off-chain signer must byte-match
+them; the EIP-712 domain is name `Kodyl`, version `1`, the deployment's `chainId`
+and contract address):
+
+- `Ticket(uint256 eventId)` - signed by the **attendee's** wallet, once, any time
+  before or during the event. It proves control of and consent by the registered
+  address. Timeless: no expiry, no attendee address in the payload (the recovered
+  signer *is* the binding, and the contract requires it to equal the claimed
+  attendee).
+- `Presence(uint256 eventId,address attendee,uint256 validUntil)` - signed at the
+  door by the **organizer or an authorized operator**, after seeing a body. It
+  carries `validUntil` (the door sets it to now + 24 h): the settlement window.
+
+**Who submits.** Either signature alone does nothing on-chain. Given the pair,
+*anyone* may submit it within the window - a relayer, the operator's device once
+it regains signal, or the attendee themselves (self-rescue). Submission is not
+access-controlled because the two signatures are the authorization.
+
+```solidity
+checkInWithProof(uint256 eid, address attendee, uint256 validUntil,
+                 bytes ticketSig, bytes presenceSig)
+checkInBatchWithProofs(uint256 eid, address[] attendees, uint256[] validUntils,
+                       bytes[] ticketSigs, bytes[] presenceSigs)
+```
+
+Each pair is verified: the event exists and check-in is open (`Active`/`Dispute`,
+same gate as the direct path); `now <= validUntil` else `ProofExpired` (inclusive);
+the ticket signer equals `attendee` else `TicketSignerMismatch`; the presence
+signer is the organizer or an operator else `PresenceSignerUnauthorized`. Then the
+same idempotent flip as the direct path (already-checked-in or not-registered is a
+silent no-op).
+
+**Signatures** are the 65-byte `r || s || v` form a wallet's `signTypedData`
+returns. Recovery uses the standard `ecrecover`, which **reverts** on a malformed
+signature rather than returning zero (`MalleableSignatureRejected` for the high-s
+form, `ECRecoverFailed` for an unrecoverable one). A wrong-length signature reverts
+`InvalidSignatureLength`.
+
+**Batch revert-vs-skip.** The batch mirrors `checkInBatch`'s philosophy with one
+sharp distinction: status-based skips (not registered, already checked in) stay
+**silent no-ops**, but any **signature, authorization, or expiry failure reverts
+the whole batch** - a bad proof is a malformed submission, not benign state drift.
+Array-length mismatches revert `ProofArrayMismatch`; the 100-entry `MAX_BATCH_SIZE`
+cap applies as for the direct batch.
+
+**Operators.** An event's organizer may authorize door operators on-chain:
+
+```solidity
+addOperator(uint256 eid, address operator)     // organizer-only, emits OperatorSet
+removeOperator(uint256 eid, address operator)   // organizer-only, emits OperatorSet
+isOperator(uint256 eid, address addr) -> bool   // zero-tier: false for unknown ids
+```
+
+An operator's Presence signature carries the **same check-in authority as the
+organizer's**. There is a separate `addOperator`/`removeOperator` pair rather than
+one `setOperator(eid, operator, bool)` because the Core Solidity toolchain has no
+calldata decoder for a `bool` parameter yet (a language gap, not a design choice);
+both route through one internal setter and emit `OperatorSet(uint256,address,bool)`.
+
+**Ticket sharing is tolerated, not marketed.** A Ticket signature can be forwarded
+to a friend - there is deliberately no anti-share binding, freshness, or liveness
+mechanic. The human at the door is the real check: the operator signs `Presence`
+only after seeing a body. That trust in the door is accepted and stays. (This is
+why the original "self-check-in via QR" idea below, rejected for being too easy to
+share, is safe here: the presence attestation, not the ticket, is the gate.)
+
 ## Settlement
 
 ### Claiming (Pull Pattern)
@@ -351,6 +429,8 @@ No reentrancy guard: status transitions are terminal and flip before any send (C
 
 What the organizer *cannot* do: change any event parameter after creation, take custody directly (no payout path pays the organizer as such), cancel after the event starts, block a pre-deadline cancel, or block refunds on a cancelled event.
 
+**Operators inherit the check-in authority.** An authorized operator can sign a valid `Presence`, so the sybil-check-in surface above extends to every operator the organizer appoints: an operator can attest presence for a sock puppet exactly as the organizer can. **Appointing an operator is therefore a trust decision equivalent to sharing the organizer's check-in power** - not a lesser delegation. The set is on-chain and verifiable (`isOperator`, the `OperatorSet` log), and revocable at any time (`removeOperator`), so the trust is auditable and retractable, but while an operator is authorized their attestations carry full weight. What an operator still cannot do matches the organizer's own limits: no parameter changes, no direct custody, no cancellation.
+
 **Maintainer liveness.** The maintainer is assumed to accept plain ETH. A maintainer contract that reverts on receipt blocks only dust egress - `claim`, `cancel`, and `claimRefund` pay the caller and are unaffected - and the situation is self-healing via `setMaintainer`. (Validation failures in `setMaintainer` and construction reuse the `InvalidEventParameters(string)` error shape - a deliberate wire-compatibility choice, see `core/README.md`.)
 
 ### Attack Vectors
@@ -358,6 +438,9 @@ What the organizer *cannot* do: change any event parameter after creation, take 
 | Attack | Outcome / Mitigation |
 |--------|----------------------|
 | Organizer sybil check-in (register a sock puppet, check in only it) | **Not prevented** - the sybil claims the whole pot. Economic/reputational deterrence only; future: organizer stake |
+| Operator sybil check-in (an authorized operator attests presence for a sock puppet) | **Not prevented** - same surface as the organizer; appointing an operator grants the organizer's check-in power. On-chain, auditable (`isOperator`), revocable (`removeOperator`) |
+| Ticket sharing (an attendee forwards their signed `Ticket` to a friend) | **Tolerated by design** - no anti-share binding. The human at the door gates check-in: an operator signs `Presence` only after seeing a body |
+| Forged / replayed proof (wrong signer, wrong event, wrong chain, expired) | Rejected on-chain: `TicketSignerMismatch`, `PresenceSignerUnauthorized`, `ProofExpired`, or domain-mismatch (recovers a different signer). Malformed signatures revert (`MalleableSignatureRejected` / `ECRecoverFailed` / `InvalidSignatureLength`) |
 | Organizer checks in nobody | **Not prevented** - all deposits become maintainer dust (immediately at Settled, or via the 30-day sweep). Same trust surface |
 | Front-running check-ins | Not profitable - check-in doesn't transfer value |
 | Reentrancy on claim/refund/dust | CEI + terminal status transitions; attacked directly in the accounting suite |
@@ -378,6 +461,8 @@ What the organizer *cannot* do: change any event parameter after creation, take 
 - [x] Cancellation with immediate refund (deadline-inclusive)
 - [x] Re-registration after cancellation
 - [x] Manual check-in by organizer only (single and batch, max 100 per batch)
+- [x] Proof-based check-in (EIP-712 `Ticket` + `Presence`; anyone submits within a 24 h window; single and batch)
+- [x] On-chain door operators per event (`addOperator`/`removeOperator`/`isOperator`)
 - [x] Pro-rata distribution of no-show deposits
 - [x] Dispute period for late check-in approval (bounded 1 hour to 30 days)
 - [x] Event cancellation with full refunds (before start only; refunds never expire)
@@ -399,7 +484,8 @@ What the organizer *cannot* do: change any event parameter after creation, take 
 - [ ] DAO governance for protocol-level decisions
 - [ ] Protocol fees
 - [ ] Privacy features (ZK proofs for attendance without revealing identity)
-- [ ] Self-check-in via QR code / signed message (too easy to share with friends)
+- [ ] Pure self-check-in with no door attestation (rejected as too easy to share; the proof-based path keeps the human at the door via the operator's `Presence` signature)
+- [ ] EIP-1271 contract signers for `Presence` (a door operator that is a multisig - the natural v3; see `CHECKIN-PLAN.md`)
 - [ ] Reputation/history tracking across events
 - [ ] POAP integration (auto-distribute POAPs to checked-in attendees via POAP API)
 - [ ] Multi-sig organizer support
@@ -417,6 +503,7 @@ What exists:
 - **State communication**: derived-state labels, countdowns to the next lifecycle boundary, and explicit dispute messaging ("claims open at settlement: the organizer can still approve late check-ins")
 - **Identity toggle**: demo accounts (impersonated anvil keys, best for talks) or a real injected wallet; all demo affordances - account picker, chain-clock fast-forward, demo drawer - are chain-gated to local anvil and disappear on real networks
 - **Structured metadata** encoded into on-chain `data:` URIs behind a single resolver seam that also understands `http(s)` and `ipfs://`
+- **Proof-based check-in**: an attendee signs a `Ticket` once and shows it as a QR code or copyable text; the organizer or an operator scans/pastes it in a Door tab, countersigns `Presence`, and submits the pair (or a stranded attendee self-rescues from the mailbox relay). The bundled `mailbox/` service (zero-dependency Node HTTP relay) carries the operator's half to the attendee; it is trust-free, since the contract verifies both signatures
 
 Still aspirational (tracked in `frontend/ROLES-PLAN.md`): an edit-metadata UI, a `setMaintainer` control, real IPFS metadata hosting, search/filters, share links, calendar export, and an indexer if log-scanning gets slow.
 

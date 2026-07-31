@@ -113,3 +113,62 @@ attempt), and across a full campaign checkIn/claim/claimDust each succeed
 hundreds of times - versus 1-4 per campaign before the phase-aware rework -
 so reward payouts and dust sweeps are exercised within runs, not just
 registration.
+
+## Proof-based check-in (v2)
+
+The two-signature path (`checkInWithProof`, `checkInBatchWithProofs`) and its
+on-chain operator set. Digests are recomputed independently in the test
+(`keccak256(abi.encode(typehash, ...))` plus the `0x1901` prefix), so a green
+test also cross-checks the contract's hand-rolled hashing.
+
+| Behavior | Verified by |
+|---|---|
+| Single-proof happy path, submitted by an unrelated relayer (not the organizer) | test_proofCheckIn_happyPath_submittedByAnyone |
+| Proof check-in succeeds during Dispute (window is Active + Dispute) | test_proofCheckIn_succeedsDuringDispute |
+| Batch succeeds at the inclusive Dispute back edge (eventEnd + disputePeriod) | test_proofBatch_succeedsAtDisputeBackEdge |
+| Replaying a consumed proof is a silent no-op (checkedInCount unchanged) | test_proofCheckIn_replayIsSilentNoOp |
+| Valid proofs for a never-registered address are a silent no-op | test_proofCheckIn_notRegisteredIsSilentSkip |
+| Expiry boundary: t == validUntil submits, t == validUntil + 1 reverts ProofExpired | test_proofCheckIn_expiryBoundary |
+| Wrong ticket signer reverts TicketSignerMismatch | test_proofCheckIn_wrongTicketSignerReverts |
+| Ticket signed for a different event reverts TicketSignerMismatch | test_proofCheckIn_ticketForOtherEventReverts |
+| Self-signed / non-operator presence reverts PresenceSignerUnauthorized; a presence bound to A cannot check in B | test_proofCheckIn_unauthorizedPresenceReverts |
+| Operator-signed presence checks in after addOperator | test_proofCheckIn_operatorPresence |
+| A revoked operator's presence reverts PresenceSignerUnauthorized | test_proofCheckIn_revokedOperatorReverts |
+| Operator management auth matrix: non-organizer reverts NotOrganizer, unknown event reverts EventNotFound, isOperator is zero-tier | test_operatorManagement_authMatrix |
+| Wrong-length signature reverts InvalidSignatureLength (ticket and presence positions) | test_proofCheckIn_invalidSignatureLengthReverts |
+| High-s signature reverts MalleableSignatureRejected | test_proofCheckIn_malleableHighSReverts |
+| Invalid recovery (v = 0) reverts ECRecoverFailed, never a stale scratch signer (recoverStrict regression; mutation-verified) | test_proofCheckIn_invalidRecoveryDoesNotReturnStaleSigner |
+| Domain binding: a digest signed for a different verifyingContract or chainId fails signer equality | test_proofCheckIn_domainBindingRejectsForeignDigests |
+| State gates: Registration / Settled / cancelled all revert CheckInWindowClosed | test_proofCheckIn_stateGates |
+| Unknown event reverts EventNotFound (single and batch) | test_proofCheckIn_unknownEventReverts |
+| Batch happy path mixed with an already-checked-in no-op | test_proofBatch_happyPath_mixedWithNoOp |
+| One bumpCheckedIn per external call, not per attendee (no storage slot written twice) | test_proofBatch_oneBumpCheckedInPerCall |
+| A bad signature reverts the whole batch atomically (an earlier valid entry is not applied) | test_proofBatch_badSignatureRevertsWholeBatch |
+| An expired entry at a non-zero index reverts the whole batch (per-entry validUntil, not validUntils[0]) | test_proofBatch_expiredEntryAtNonZeroIndexReverts |
+| Array-length mismatch reverts ProofArrayMismatch | test_proofBatch_arrayMismatchReverts |
+| Over-cap batch reverts BatchTooLarge before any signature work | test_proofBatch_capBatchTooLarge |
+| Empty batch is a no-op | test_proofBatch_emptyIsNoOp |
+
+## Toolchain canaries (test/CoreProbe.t.sol)
+
+`Probe.solc` exercises each language feature the implementation leans on;
+`check-core.sh` compiles it first, so drift fails on the small labeled contract
+before Kodyl. The v2 additions pin the EIP-712 / ecrecover / calldata-array
+surface the proof path depends on.
+
+| Behavior | Verified by |
+|---|---|
+| Constructor args, dispatch, and an opcode wrapper end to end; unknown selector reverts | test_probe_ctorArgs_dispatch_and_opcode |
+| require(cond, "msg") reverts RAW message bytes (not Solidity Error(string)) | test_probe_requireMessage_revertsRawBytes |
+| User-defined Str instance folds a signature literal to its selector at compile time | test_probe_strInstance_foldsSelector |
+| UFCS methods on a storage array of strings (push/length/index) | test_probe_ufcsStorageArray |
+| Bare integer literal in a non-tail return | test_probe_bareLiteralNonTailReturn |
+| std eip712 domain separator and 0x1901 digest match an independent Solidity computation | test_probe_eip712_domainSeparator_and_digest |
+| Hand-rolled hashStruct via nested two-arg concat == keccak256(abi.encode(typeHash, members)) | test_probe_eip712_handRolledStructHash |
+| Split-form ecrecover round-trips a vm.sign signature to the signer | test_probe_ecrecover_roundTrip |
+| High-s form reverts MalleableSignatureRejected (0x25260b20) | test_probe_ecrecover_malleableHighS_reverts |
+| An unrecoverable signature reverts ECRecoverFailed (0x4fbfae63) - std ecrecover never returns zero | test_probe_ecrecover_invalid_revertsFailed |
+| ECRecoverCallFailed is unobservable: gas starvation is a plain OOG with empty returndata (swept window with a top-edge success assert) | test_probe_ecrecover_gasStarved_isPlainOogNotCallFailed |
+| calldata(array(address)): length, indexing, ArrayOutOfBounds (0x7f52b2bf) | test_probe_calldataAddressArray |
+| calldata(array(memory(bytes))): dynamic elements incl. a 65-byte signature element, bounds, empty array | test_probe_calldataBytesArray |
+| calldata(array(uint256)): index, bounds, full iteration (no upstream fixture - this canary is the coverage) | test_probe_calldataUintArray |
