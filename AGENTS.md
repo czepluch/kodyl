@@ -24,8 +24,10 @@ Check-in has two paths. The **direct** path (`checkIn`, `checkInBatch`) is an
 organizer transaction. The **proof-based** path (v2) decouples the door from
 the write: an attendee signs an EIP-712 `Ticket(uint256 eventId)`, the
 organizer or an authorized operator signs `Presence(uint256 eventId,address
-attendee,uint256 validUntil)`, and anyone submits the pair via
-`checkInWithProof` / `checkInBatchWithProofs` within the `validUntil` window.
+attendee)`, and anyone submits the pair via
+`checkInWithProof` / `checkInBatchWithProofs` while check-in is open - a
+`Presence` has no expiry of its own; the dispute-window state gate
+(`requireCheckInOpen`) is the only time bound.
 Operators are a nested-mapping set (slot 8), organizer-only, managed by
 `addOperator`/`removeOperator` (a pair, not `setOperator(...,bool)` - no `bool`
 calldata decoder) and read by `isOperator`. Signature recovery goes through

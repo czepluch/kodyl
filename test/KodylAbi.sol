@@ -48,9 +48,6 @@ interface KodylAbi {
     /// @dev Presence signature recovers to neither the organizer nor an
     ///      authorized operator of the event.
     error PresenceSignerUnauthorized();
-    /// @dev The proof's validUntil lies in the past (t == validUntil still
-    ///      submits; the boundary is inclusive).
-    error ProofExpired();
     /// @dev A signature parameter is not exactly 65 bytes (r || s || v).
     error InvalidSignatureLength();
     /// @dev checkInBatchWithProofs array arguments differ in length.
@@ -103,23 +100,18 @@ interface KodylAbi {
     /// @dev Fallback-dispatched in the contract, but a standard call from a client.
     function checkInBatch(uint256 eid, address[] calldata attendees) external;
     /// @dev Proof-based check-in: anyone may submit an attendee-signed Ticket
-    ///      plus an organizer/operator-signed Presence within its validUntil
-    ///      window. Signatures are 65-byte r || s || v (EIP-712, domain
+    ///      plus an organizer/operator-signed Presence while check-in is open
+    ///      (Active/Dispute - the dispute window is the only time bound).
+    ///      Signatures are 65-byte r || s || v (EIP-712, domain
     ///      name "Kodyl" version "1").
-    function checkInWithProof(
-        uint256 eid,
-        address attendee,
-        uint256 validUntil,
-        bytes calldata ticketSig,
-        bytes calldata presenceSig
-    ) external;
-    /// @dev Batch form. Signature/authorization/expiry failures revert the
+    function checkInWithProof(uint256 eid, address attendee, bytes calldata ticketSig, bytes calldata presenceSig)
+        external;
+    /// @dev Batch form. Signature/authorization failures revert the
     ///      whole batch; status-based skips (already checked in, not
     ///      registered) are silent no-ops, mirroring checkInBatch.
     function checkInBatchWithProofs(
         uint256 eid,
         address[] calldata attendees,
-        uint256[] calldata validUntils,
         bytes[] calldata ticketSigs,
         bytes[] calldata presenceSigs
     ) external;

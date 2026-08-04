@@ -44,9 +44,11 @@ singleton:
   pays out the pot, not a balance reading.
 - Proof-based check-in rides on the std's EIP-712 helpers (`std/eip712.solc`,
   the argotorg pin). Two hand-rolled struct hashes (`Ticket(uint256 eventId)`,
-  `Presence(uint256 eventId,address attendee,uint256 validUntil)`) built with
+  `Presence(uint256 eventId,address attendee)`) built with
   `concat`/`keccak256_` - there is no `hashStruct` helper - feed the 0x1901
-  digest, then split-form `ecrecover` recovers each signer. Both
+  digest, then split-form `ecrecover` recovers each signer. A proof carries
+  no expiry of its own: the derived-state check-in gate (Active/Dispute) is
+  the single time bound - one gate, not two. Both
   `checkInWithProof` and `checkInBatchWithProofs` share one internal
   `verifyProof`, and `ecrecover` goes through a `recoverStrict` shim that
   zeroes the scratch slot first (std's `ecrecover` reads its result from
@@ -74,7 +76,7 @@ Build and test:
 forge test                       # forge is a harness only (see foundry.toml)
 ```
 
-`test/Kodyl.t.sol` (84 scenarios) and `test/KodylInvariant.t.sol` (128k-call
+`test/Kodyl.t.sol` (82 scenarios) and `test/KodylInvariant.t.sol` (128k-call
 ledger fuzz across three concurrent events), plus `test/KodylAccounting.t.sol`
 and `test/KodylConservation.t.sol` (reentrancy + full-lifecycle conservation),
 drive the compiled bytecode through a typed Solidity interface inside forge -

@@ -1084,8 +1084,7 @@ contract KodylTest is Test {
     bytes32 internal constant DOMAIN_TYPEHASH =
         keccak256("EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)");
     bytes32 internal constant TICKET_TYPEHASH = keccak256("Ticket(uint256 eventId)");
-    bytes32 internal constant PRESENCE_TYPEHASH =
-        keccak256("Presence(uint256 eventId,address attendee,uint256 validUntil)");
+    bytes32 internal constant PRESENCE_TYPEHASH = keccak256("Presence(uint256 eventId,address attendee)");
     uint256 internal constant SECP256K1_N =
         0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141;
 
@@ -1107,14 +1106,9 @@ contract KodylTest is Test {
         return abi.encodePacked(r, s, v);
     }
 
-    function _signPresence(uint256 pk, uint256 eid, address attendee, uint256 validUntil)
-        internal
-        view
-        returns (bytes memory)
-    {
-        (uint8 v, bytes32 r, bytes32 s) = vm.sign(
-            pk, _digest712(keccak256(abi.encode(PRESENCE_TYPEHASH, eid, attendee, validUntil)))
-        );
+    function _signPresence(uint256 pk, uint256 eid, address attendee) internal view returns (bytes memory) {
+        (uint8 v, bytes32 r, bytes32 s) =
+            vm.sign(pk, _digest712(keccak256(abi.encode(PRESENCE_TYPEHASH, eid, attendee))));
         return abi.encodePacked(r, s, v);
     }
 
@@ -1134,14 +1128,11 @@ contract KodylTest is Test {
 
     function test_proofCheckIn_happyPath_submittedByAnyone() public {
         (uint256 eid, , uint256 orgPk, address dana, uint256 danaPk) = _proofSetup();
-        uint256 validUntil = block.timestamp + 24 hours;
 
         vm.expectEmit(true, true, false, true);
         emit CheckedIn(eid, dana);
         vm.prank(makeAddr("relayer"));
-        k.checkInWithProof(
-            eid, dana, validUntil, _signTicket(danaPk, eid), _signPresence(orgPk, eid, dana, validUntil)
-        );
+        k.checkInWithProof(eid, dana, _signTicket(danaPk, eid), _signPresence(orgPk, eid, dana));
 
         assertEq(k.attendees(eid, dana), CHECKED_IN);
         assertEq(k.checkedInCount(eid), 1);
@@ -1149,59 +1140,27 @@ contract KodylTest is Test {
 
     function test_proofCheckIn_replayIsSilentNoOp() public {
         (uint256 eid, , uint256 orgPk, address dana, uint256 danaPk) = _proofSetup();
-        uint256 validUntil = block.timestamp + 24 hours;
         bytes memory t = _signTicket(danaPk, eid);
-        bytes memory p = _signPresence(orgPk, eid, dana, validUntil);
+        bytes memory p = _signPresence(orgPk, eid, dana);
 
-        k.checkInWithProof(eid, dana, validUntil, t, p);
+        k.checkInWithProof(eid, dana, t, p);
         assertEq(k.checkedInCount(eid), 1);
 
         // Same pair again: checkInInner sees CheckedIn and skips - no revert,
         // no double count.
-        k.checkInWithProof(eid, dana, validUntil, t, p);
+        k.checkInWithProof(eid, dana, t, p);
         assertEq(k.checkedInCount(eid), 1);
         assertEq(k.attendees(eid, dana), CHECKED_IN);
-    }
-
-    function test_proofCheckIn_expiryBoundary() public {
-        (uint256 eid, , uint256 orgPk, address dana, uint256 danaPk) = _proofSetup();
-        (address erin, uint256 erinPk) = makeAddrAndKey("erin");
-        // Second attendee registered pre-Active (the fixture warps before
-        // this test body runs, so rewind to register, then return).
-        vm.warp(START_TS);
-        _register(eid, erin);
-        _toActive();
-
-        uint256 validUntil = block.timestamp + 24 hours;
-        bytes memory tDana = _signTicket(danaPk, eid);
-        bytes memory pDana = _signPresence(orgPk, eid, dana, validUntil);
-        bytes memory tErin = _signTicket(erinPk, eid);
-        bytes memory pErin = _signPresence(orgPk, eid, erin, validUntil);
-
-        // t == validUntil: inclusive boundary, still submits (the check-in
-        // window is also still open: validUntil == eventEnd here).
-        vm.warp(validUntil);
-        k.checkInWithProof(eid, dana, validUntil, tDana, pDana);
-        assertEq(k.attendees(eid, dana), CHECKED_IN);
-
-        // t == validUntil + 1 lands in Dispute (window open), so the revert
-        // is ProofExpired, not the state gate.
-        vm.warp(validUntil + 1);
-        vm.expectRevert(KodylAbi.ProofExpired.selector);
-        k.checkInWithProof(eid, erin, validUntil, tErin, pErin);
     }
 
     function test_proofCheckIn_succeedsDuringDispute() public {
         (uint256 eid, , uint256 orgPk, address dana, uint256 danaPk) = _proofSetup();
         // Window admits Active AND Dispute; the feature's whole point is
-        // submission after the doors, inside the 24h settlement window.
-        uint256 validUntil = eventEnd + 24 hours;
+        // submission after the doors, inside the dispute window.
         vm.warp(eventEnd + 2 hours); // Dispute (past eventEnd, before eventEnd+disputePeriod)
         assertEq(k.getState(eid), ST_DISPUTE);
 
-        k.checkInWithProof(
-            eid, dana, validUntil, _signTicket(danaPk, eid), _signPresence(orgPk, eid, dana, validUntil)
-        );
+        k.checkInWithProof(eid, dana, _signTicket(danaPk, eid), _signPresence(orgPk, eid, dana));
         assertEq(k.attendees(eid, dana), CHECKED_IN);
     }
 
@@ -1209,22 +1168,26 @@ contract KodylTest is Test {
         (uint256 eid, address org, uint256 orgPk, address dana, uint256 danaPk) = _proofSetup();
         // The inclusive back edge of the window: eventEnd + disputePeriod is
         // still Dispute (test_getState/test_checkIn_windowBackEdge pin this).
-        uint256 validUntil = eventEnd + disputePeriod + 24 hours;
+        // With no per-proof expiry this is the last instant a proof submits.
         vm.warp(eventEnd + disputePeriod);
         assertEq(k.getState(eid), ST_DISPUTE);
 
         address[] memory who = new address[](1);
         who[0] = dana;
-        uint256[] memory untils = new uint256[](1);
-        untils[0] = validUntil;
         bytes[] memory tickets = new bytes[](1);
         tickets[0] = _signTicket(danaPk, eid);
         bytes[] memory presences = new bytes[](1);
-        presences[0] = _signPresence(orgPk, eid, dana, validUntil);
+        presences[0] = _signPresence(orgPk, eid, dana);
 
         vm.prank(org);
-        k.checkInBatchWithProofs(eid, who, untils, tickets, presences);
+        k.checkInBatchWithProofs(eid, who, tickets, presences);
         assertEq(k.attendees(eid, dana), CHECKED_IN);
+
+        // One second later the event is Settled: the same proof-path call now
+        // reverts CheckInWindowClosed - the dispute gate is the sole bound.
+        vm.warp(eventEnd + disputePeriod + 1);
+        vm.expectRevert(KodylAbi.CheckInWindowClosed.selector);
+        k.checkInBatchWithProofs(eid, who, tickets, presences);
     }
 
     function test_proofCheckIn_invalidRecoveryDoesNotReturnStaleSigner() public {
@@ -1235,8 +1198,7 @@ contract KodylTest is Test {
         // spurious signer match. Assert the failure surfaces (never a silent
         // success or a stale-address TicketSignerMismatch that hides it).
         (uint256 eid, , uint256 orgPk, address dana, uint256 danaPk) = _proofSetup();
-        uint256 validUntil = block.timestamp + 24 hours;
-        bytes memory presence = _signPresence(orgPk, eid, dana, validUntil);
+        bytes memory presence = _signPresence(orgPk, eid, dana);
 
         // Ticket with v = 0 (invalid recovery id). Low-s so the malleability
         // guard passes and the precompile is actually reached.
@@ -1247,7 +1209,7 @@ contract KodylTest is Test {
             ticketV0 = abi.encodePacked(r, s, uint8(0));
         }
         vm.expectRevert(KodylAbi.ECRecoverFailed.selector);
-        k.checkInWithProof(eid, dana, validUntil, ticketV0, presence);
+        k.checkInWithProof(eid, dana, ticketV0, presence);
         assertEq(k.attendees(eid, dana), REGISTERED);
     }
 
@@ -1257,12 +1219,8 @@ contract KodylTest is Test {
         // the direct checkIn tolerance.
         (uint256 eid, , uint256 orgPk, , ) = _proofSetup();
         (address mallory, uint256 malloryPk) = makeAddrAndKey("mallory");
-        uint256 validUntil = block.timestamp + 24 hours;
 
-        k.checkInWithProof(
-            eid, mallory, validUntil,
-            _signTicket(malloryPk, eid), _signPresence(orgPk, eid, mallory, validUntil)
-        );
+        k.checkInWithProof(eid, mallory, _signTicket(malloryPk, eid), _signPresence(orgPk, eid, mallory));
         assertEq(k.attendees(eid, mallory), NONE);
         assertEq(k.checkedInCount(eid), 0);
     }
@@ -1275,13 +1233,9 @@ contract KodylTest is Test {
         vm.warp(START_TS + 1);
         uint256 other = _createAs(org, 0);
         vm.warp(eventStart); // back to Active for eid
-        uint256 validUntil = block.timestamp + 24 hours;
 
         vm.expectRevert(KodylAbi.TicketSignerMismatch.selector);
-        k.checkInWithProof(
-            eid, dana, validUntil,
-            _signTicket(danaPk, other), _signPresence(orgPk, eid, dana, validUntil)
-        );
+        k.checkInWithProof(eid, dana, _signTicket(danaPk, other), _signPresence(orgPk, eid, dana));
         assertEq(k.attendees(eid, dana), REGISTERED);
     }
 
@@ -1295,24 +1249,20 @@ contract KodylTest is Test {
         vm.warp(START_TS);
         _register(eid, erin);
         _toActive();
-        uint256 validUntil = block.timestamp + 24 hours;
 
         address[] memory who = new address[](2);
         who[0] = dana;
         who[1] = erin;
-        uint256[] memory untils = new uint256[](2);
-        untils[0] = validUntil;
-        untils[1] = validUntil;
         bytes[] memory tickets = new bytes[](2);
         tickets[0] = _signTicket(danaPk, eid);
         tickets[1] = _signTicket(erinPk, eid);
         bytes[] memory presences = new bytes[](2);
-        presences[0] = _signPresence(orgPk, eid, dana, validUntil);
-        presences[1] = _signPresence(orgPk, eid, erin, validUntil);
+        presences[0] = _signPresence(orgPk, eid, dana);
+        presences[1] = _signPresence(orgPk, eid, erin);
 
         vm.record();
         vm.prank(org);
-        k.checkInBatchWithProofs(eid, who, untils, tickets, presences);
+        k.checkInBatchWithProofs(eid, who, tickets, presences);
         (, bytes32[] memory writes) = vm.accesses(address(k));
 
         assertEq(k.checkedInCount(eid), 2, "both should have flipped");
@@ -1329,79 +1279,38 @@ contract KodylTest is Test {
         }
     }
 
-    function test_proofBatch_expiredEntryAtNonZeroIndexReverts() public {
-        // Pins per-entry validUntil indexing: a mutant reading validUntils[0]
-        // for every element would accept an expired entry at index 1. Entry 0
-        // has an open window, entry 1 is expired; the batch must revert.
-        (uint256 eid, address org, uint256 orgPk, address dana, uint256 danaPk) = _proofSetup();
-        (address erin, uint256 erinPk) = makeAddrAndKey("erin");
-        vm.warp(START_TS);
-        _register(eid, erin);
-        _toActive();
-
-        uint256 openUntil = eventEnd + disputePeriod;   // still valid now
-        uint256 expiredUntil = block.timestamp - 1;      // already past
-
-        address[] memory who = new address[](2);
-        who[0] = dana;
-        who[1] = erin;
-        uint256[] memory untils = new uint256[](2);
-        untils[0] = openUntil;
-        untils[1] = expiredUntil;
-        bytes[] memory tickets = new bytes[](2);
-        tickets[0] = _signTicket(danaPk, eid);
-        tickets[1] = _signTicket(erinPk, eid);
-        bytes[] memory presences = new bytes[](2);
-        presences[0] = _signPresence(orgPk, eid, dana, openUntil);
-        presences[1] = _signPresence(orgPk, eid, erin, expiredUntil);
-
-        vm.prank(org);
-        vm.expectRevert(KodylAbi.ProofExpired.selector);
-        k.checkInBatchWithProofs(eid, who, untils, tickets, presences);
-        assertEq(k.checkedInCount(eid), 0);
-    }
-
     function test_proofCheckIn_wrongTicketSignerReverts() public {
         (uint256 eid, , uint256 orgPk, address dana, ) = _proofSetup();
         (, uint256 erinPk) = makeAddrAndKey("erin");
-        uint256 validUntil = block.timestamp + 24 hours;
 
         // Ticket signed by erin's key but claiming dana: the recovered signer
         // is erin, not the claimed attendee.
         vm.expectRevert(KodylAbi.TicketSignerMismatch.selector);
-        k.checkInWithProof(
-            eid, dana, validUntil, _signTicket(erinPk, eid), _signPresence(orgPk, eid, dana, validUntil)
-        );
+        k.checkInWithProof(eid, dana, _signTicket(erinPk, eid), _signPresence(orgPk, eid, dana));
         assertEq(k.attendees(eid, dana), REGISTERED);
     }
 
     function test_proofCheckIn_unauthorizedPresenceReverts() public {
         (uint256 eid, , uint256 orgPk, address dana, uint256 danaPk) = _proofSetup();
         (address erin, uint256 erinPk) = makeAddrAndKey("erin");
-        uint256 validUntil = block.timestamp + 24 hours;
 
         // Presence self-signed by the attendee: valid signature, wrong signer.
         vm.expectRevert(KodylAbi.PresenceSignerUnauthorized.selector);
-        k.checkInWithProof(
-            eid, dana, validUntil, _signTicket(danaPk, eid), _signPresence(danaPk, eid, dana, validUntil)
-        );
+        k.checkInWithProof(eid, dana, _signTicket(danaPk, eid), _signPresence(danaPk, eid, dana));
 
         // Presence the organizer signed for DANA replayed for erin: the
-        // contract hashes (eid, erin, validUntil), so the recovered signer is
-        // no longer the organizer - the attestation is bound to one body.
+        // contract hashes (eid, erin), so the recovered signer is no longer
+        // the organizer - the attestation is bound to one body.
         vm.warp(START_TS);
         _register(eid, erin);
         _toActive();
         vm.expectRevert(KodylAbi.PresenceSignerUnauthorized.selector);
-        k.checkInWithProof(
-            eid, erin, validUntil, _signTicket(erinPk, eid), _signPresence(orgPk, eid, dana, validUntil)
-        );
+        k.checkInWithProof(eid, erin, _signTicket(erinPk, eid), _signPresence(orgPk, eid, dana));
     }
 
     function test_proofCheckIn_operatorPresence() public {
         (uint256 eid, address org, , address dana, uint256 danaPk) = _proofSetup();
         (address doorOp, uint256 doorPk) = makeAddrAndKey("doorOp");
-        uint256 validUntil = block.timestamp + 24 hours;
 
         vm.expectEmit(true, true, false, true);
         emit OperatorSet(eid, doorOp, true);
@@ -1410,16 +1319,13 @@ contract KodylTest is Test {
         assertTrue(k.isOperator(eid, doorOp));
 
         // Operator-countersigned presence checks dana in.
-        k.checkInWithProof(
-            eid, dana, validUntil, _signTicket(danaPk, eid), _signPresence(doorPk, eid, dana, validUntil)
-        );
+        k.checkInWithProof(eid, dana, _signTicket(danaPk, eid), _signPresence(doorPk, eid, dana));
         assertEq(k.attendees(eid, dana), CHECKED_IN);
     }
 
     function test_proofCheckIn_revokedOperatorReverts() public {
         (uint256 eid, address org, , address dana, uint256 danaPk) = _proofSetup();
         (address doorOp, uint256 doorPk) = makeAddrAndKey("doorOp");
-        uint256 validUntil = block.timestamp + 24 hours;
 
         vm.prank(org);
         k.addOperator(eid, doorOp);
@@ -1431,9 +1337,7 @@ contract KodylTest is Test {
 
         // The revoked operator's attestation no longer authorizes.
         vm.expectRevert(KodylAbi.PresenceSignerUnauthorized.selector);
-        k.checkInWithProof(
-            eid, dana, validUntil, _signTicket(danaPk, eid), _signPresence(doorPk, eid, dana, validUntil)
-        );
+        k.checkInWithProof(eid, dana, _signTicket(danaPk, eid), _signPresence(doorPk, eid, dana));
     }
 
     function test_operatorManagement_authMatrix() public {
@@ -1456,21 +1360,19 @@ contract KodylTest is Test {
 
     function test_proofCheckIn_invalidSignatureLengthReverts() public {
         (uint256 eid, , uint256 orgPk, address dana, uint256 danaPk) = _proofSetup();
-        uint256 validUntil = block.timestamp + 24 hours;
         bytes memory good = _signTicket(danaPk, eid);
         bytes memory short64 = new bytes(64);
         bytes memory long66 = abi.encodePacked(good, uint8(0));
 
         vm.expectRevert(KodylAbi.InvalidSignatureLength.selector);
-        k.checkInWithProof(eid, dana, validUntil, short64, _signPresence(orgPk, eid, dana, validUntil));
+        k.checkInWithProof(eid, dana, short64, _signPresence(orgPk, eid, dana));
         vm.expectRevert(KodylAbi.InvalidSignatureLength.selector);
-        k.checkInWithProof(eid, dana, validUntil, good, long66);
+        k.checkInWithProof(eid, dana, good, long66);
     }
 
     function test_proofCheckIn_malleableHighSReverts() public {
         (uint256 eid, , uint256 orgPk, address dana, uint256 danaPk) = _proofSetup();
-        uint256 validUntil = block.timestamp + 24 hours;
-        bytes memory presence = _signPresence(orgPk, eid, dana, validUntil);
+        bytes memory presence = _signPresence(orgPk, eid, dana);
 
         // Rewrite the valid ticket signature into its high-s twin; the std
         // rejects it before the precompile ever runs.
@@ -1484,14 +1386,13 @@ contract KodylTest is Test {
         }
 
         vm.expectRevert(KodylAbi.MalleableSignatureRejected.selector);
-        k.checkInWithProof(eid, dana, validUntil, highS, presence);
+        k.checkInWithProof(eid, dana, highS, presence);
     }
 
     function test_proofCheckIn_domainBindingRejectsForeignDigests() public {
         (uint256 eid, , uint256 orgPk, address dana, uint256 danaPk) = _proofSetup();
-        uint256 validUntil = block.timestamp + 24 hours;
         bytes32 ticketStruct = keccak256(abi.encode(TICKET_TYPEHASH, eid));
-        bytes memory presence = _signPresence(orgPk, eid, dana, validUntil);
+        bytes memory presence = _signPresence(orgPk, eid, dana);
 
         // Signed for another verifying contract: recovery yields some other
         // address, never the attendee.
@@ -1504,7 +1405,7 @@ contract KodylTest is Test {
             )
         );
         vm.expectRevert(KodylAbi.TicketSignerMismatch.selector);
-        k.checkInWithProof(eid, dana, validUntil, abi.encodePacked(r, s, v), presence);
+        k.checkInWithProof(eid, dana, abi.encodePacked(r, s, v), presence);
 
         // Signed for another chain id.
         (v, r, s) = vm.sign(
@@ -1516,7 +1417,7 @@ contract KodylTest is Test {
             )
         );
         vm.expectRevert(KodylAbi.TicketSignerMismatch.selector);
-        k.checkInWithProof(eid, dana, validUntil, abi.encodePacked(r, s, v), presence);
+        k.checkInWithProof(eid, dana, abi.encodePacked(r, s, v), presence);
     }
 
     function test_proofCheckIn_stateGates() public {
@@ -1524,20 +1425,19 @@ contract KodylTest is Test {
         (address dana, uint256 danaPk) = makeAddrAndKey("dana");
         uint256 eid = _createAs(org, 0);
         _register(eid, dana);
-        // A far-future validUntil keeps ProofExpired out of the way: the
-        // state gate must fire first in every phase.
-        uint256 validUntil = eventEnd + 60 days;
+        // The state gate is the ONLY time bound on a proof: the same signed
+        // pair must be rejected in every closed phase.
         bytes memory t = _signTicket(danaPk, eid);
-        bytes memory p = _signPresence(orgPk, eid, dana, validUntil);
+        bytes memory p = _signPresence(orgPk, eid, dana);
 
         // Registration phase.
         vm.expectRevert(KodylAbi.CheckInWindowClosed.selector);
-        k.checkInWithProof(eid, dana, validUntil, t, p);
+        k.checkInWithProof(eid, dana, t, p);
 
         // Settled.
         _toSettled();
         vm.expectRevert(KodylAbi.CheckInWindowClosed.selector);
-        k.checkInWithProof(eid, dana, validUntil, t, p);
+        k.checkInWithProof(eid, dana, t, p);
 
         // Cancelled event (fresh event, cancelled during Registration).
         vm.warp(START_TS + 1);
@@ -1547,18 +1447,14 @@ contract KodylTest is Test {
         k.cancelEvent(eid2);
         _toActive();
         vm.expectRevert(KodylAbi.CheckInWindowClosed.selector);
-        k.checkInWithProof(
-            eid2, dana, validUntil, _signTicket(danaPk, eid2), _signPresence(orgPk, eid2, dana, validUntil)
-        );
+        k.checkInWithProof(eid2, dana, _signTicket(danaPk, eid2), _signPresence(orgPk, eid2, dana));
     }
 
     function test_proofCheckIn_unknownEventReverts() public {
         vm.expectRevert(KodylAbi.EventNotFound.selector);
-        k.checkInWithProof(99, alice, block.timestamp + 1, hex"", hex"");
+        k.checkInWithProof(99, alice, hex"", hex"");
         vm.expectRevert(KodylAbi.EventNotFound.selector);
-        k.checkInBatchWithProofs(
-            99, new address[](0), new uint256[](0), new bytes[](0), new bytes[](0)
-        );
+        k.checkInBatchWithProofs(99, new address[](0), new bytes[](0), new bytes[](0));
     }
 
     function test_proofBatch_happyPath_mixedWithNoOp() public {
@@ -1567,7 +1463,6 @@ contract KodylTest is Test {
         vm.warp(START_TS);
         _register(eid, erin);
         _toActive();
-        uint256 validUntil = block.timestamp + 24 hours;
 
         // dana is already checked in via the direct organizer path; her batch
         // entry must be a silent no-op while erin's flips.
@@ -1578,18 +1473,15 @@ contract KodylTest is Test {
         address[] memory who = new address[](2);
         who[0] = dana;
         who[1] = erin;
-        uint256[] memory untils = new uint256[](2);
-        untils[0] = validUntil;
-        untils[1] = validUntil;
         bytes[] memory tickets = new bytes[](2);
         tickets[0] = _signTicket(danaPk, eid);
         tickets[1] = _signTicket(erinPk, eid);
         bytes[] memory presences = new bytes[](2);
-        presences[0] = _signPresence(orgPk, eid, dana, validUntil);
-        presences[1] = _signPresence(orgPk, eid, erin, validUntil);
+        presences[0] = _signPresence(orgPk, eid, dana);
+        presences[1] = _signPresence(orgPk, eid, erin);
 
         vm.prank(makeAddr("relayer"));
-        k.checkInBatchWithProofs(eid, who, untils, tickets, presences);
+        k.checkInBatchWithProofs(eid, who, tickets, presences);
 
         assertEq(k.attendees(eid, dana), CHECKED_IN);
         assertEq(k.attendees(eid, erin), CHECKED_IN);
@@ -1602,25 +1494,21 @@ contract KodylTest is Test {
         vm.warp(START_TS);
         _register(eid, erin);
         _toActive();
-        uint256 validUntil = block.timestamp + 24 hours;
 
         address[] memory who = new address[](2);
         who[0] = erin;
         who[1] = dana;
-        uint256[] memory untils = new uint256[](2);
-        untils[0] = validUntil;
-        untils[1] = validUntil;
         bytes[] memory tickets = new bytes[](2);
         tickets[0] = _signTicket(erinPk, eid);
         tickets[1] = _signTicket(erinPk, eid); // wrong key for dana
         bytes[] memory presences = new bytes[](2);
-        presences[0] = _signPresence(orgPk, eid, erin, validUntil);
-        presences[1] = _signPresence(orgPk, eid, dana, validUntil);
+        presences[0] = _signPresence(orgPk, eid, erin);
+        presences[1] = _signPresence(orgPk, eid, dana);
 
         // A malformed submission reverts atomically: erin's valid entry (index
         // 0, already processed) must not survive.
         vm.expectRevert(KodylAbi.TicketSignerMismatch.selector);
-        k.checkInBatchWithProofs(eid, who, untils, tickets, presences);
+        k.checkInBatchWithProofs(eid, who, tickets, presences);
         assertEq(k.attendees(eid, erin), REGISTERED);
         assertEq(k.attendees(eid, dana), REGISTERED);
         assertEq(k.checkedInCount(eid), 0);
@@ -1629,37 +1517,38 @@ contract KodylTest is Test {
     function test_proofBatch_arrayMismatchReverts() public {
         (uint256 eid, , , , ) = _proofSetup();
         address[] memory who = new address[](2);
-        uint256[] memory one = new uint256[](1);
-        uint256[] memory two = new uint256[](2);
+        address[] memory oneWho = new address[](1);
         bytes[] memory oneB = new bytes[](1);
         bytes[] memory twoB = new bytes[](2);
 
+        // Each length check tripped from both directions: a sig array shorter
+        // AND longer than toCheck (a >= or <= mutant of either equality
+        // passes one direction but not both).
         vm.expectRevert(KodylAbi.ProofArrayMismatch.selector);
-        k.checkInBatchWithProofs(eid, who, one, twoB, twoB);
+        k.checkInBatchWithProofs(eid, who, oneB, twoB);
         vm.expectRevert(KodylAbi.ProofArrayMismatch.selector);
-        k.checkInBatchWithProofs(eid, who, two, oneB, twoB);
+        k.checkInBatchWithProofs(eid, who, twoB, oneB);
         vm.expectRevert(KodylAbi.ProofArrayMismatch.selector);
-        k.checkInBatchWithProofs(eid, who, two, twoB, oneB);
+        k.checkInBatchWithProofs(eid, oneWho, twoB, oneB);
+        vm.expectRevert(KodylAbi.ProofArrayMismatch.selector);
+        k.checkInBatchWithProofs(eid, oneWho, oneB, twoB);
     }
 
     function test_proofBatch_capBatchTooLarge() public {
         (uint256 eid, , , , ) = _proofSetup();
         uint256 n = 101;
         address[] memory who = new address[](n);
-        uint256[] memory untils = new uint256[](n);
         bytes[] memory sigs = new bytes[](n);
 
         // Length checks precede the cap, and the cap precedes any signature
         // work, so empty sig payloads never get read.
         vm.expectRevert(abi.encodeWithSelector(KodylAbi.BatchTooLarge.selector, n, 100));
-        k.checkInBatchWithProofs(eid, who, untils, sigs, sigs);
+        k.checkInBatchWithProofs(eid, who, sigs, sigs);
     }
 
     function test_proofBatch_emptyIsNoOp() public {
         (uint256 eid, , , , ) = _proofSetup();
-        k.checkInBatchWithProofs(
-            eid, new address[](0), new uint256[](0), new bytes[](0), new bytes[](0)
-        );
+        k.checkInBatchWithProofs(eid, new address[](0), new bytes[](0), new bytes[](0));
         assertEq(k.checkedInCount(eid), 0);
     }
 

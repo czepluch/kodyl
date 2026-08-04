@@ -30,9 +30,9 @@ const HERE = dirname(fileURLToPath(import.meta.url))
 const SNAPSHOT = join(HERE, 'vouchers.json')
 const MAX_BODY = 1 << 20 // 1 MiB: a voucher is a few hundred bytes; cap abuse.
 
-// The seven voucher fields, all strings on the wire (bigints serialize as
+// The six voucher fields, all strings on the wire (bigints serialize as
 // decimal strings, per the frontend convention).
-const FIELDS = ['eventId', 'attendee', 'validUntil', 'ticketSig', 'presenceSig', 'chainId', 'contract']
+const FIELDS = ['eventId', 'attendee', 'ticketSig', 'presenceSig', 'chainId', 'contract']
 
 const isDecimal = (s) => typeof s === 'string' && /^[0-9]+$/.test(s)
 const isAddress = (s) => typeof s === 'string' && /^0x[0-9a-fA-F]{40}$/.test(s)
@@ -44,7 +44,6 @@ function normalize(body) {
   return {
     eventId: body.eventId,
     attendee: body.attendee.toLowerCase(),
-    validUntil: body.validUntil,
     ticketSig: body.ticketSig.toLowerCase(),
     presenceSig: body.presenceSig.toLowerCase(),
     chainId: body.chainId,
@@ -153,7 +152,6 @@ async function handlePost(req, res) {
   if (missing.length) return send(res, 400, { error: `missing or non-string fields: ${missing.join(', ')}` })
 
   if (!isDecimal(body.eventId)) return send(res, 400, { error: 'eventId must be a decimal string' })
-  if (!isDecimal(body.validUntil)) return send(res, 400, { error: 'validUntil must be a decimal string' })
   if (!isDecimal(body.chainId)) return send(res, 400, { error: 'chainId must be a decimal string' })
   if (!isAddress(body.attendee)) return send(res, 400, { error: 'attendee must be a 20-byte hex address' })
   if (!isAddress(body.contract)) return send(res, 400, { error: 'contract must be a 20-byte hex address' })

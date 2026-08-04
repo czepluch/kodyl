@@ -2,8 +2,8 @@
 // and Presence with viem using the SAME EIP-712 domain/types as src/eip712.ts
 // (drift-guarded against that source), submits against the deployed contract,
 // and confirms it accepts a valid pair (relayer-submitted and operator-signed
-// batch) and rejects wrong-signer, wrong-domain, and expired proofs. If the
-// mailbox is reachable it also checks a POST/GET voucher roundtrip.
+// batch) and rejects wrong-signer and wrong-domain proofs. If the mailbox is
+// reachable it also checks a POST/GET voucher roundtrip.
 //
 // This is the automated half of the phase-4 verification; the UI click-path in
 // README.md is the manual half. It is local-only: it uses anvil's dev keys and
@@ -38,7 +38,6 @@ const PRESENCE_TYPES = {
   Presence: [
     { name: 'eventId', type: 'uint256' },
     { name: 'attendee', type: 'address' },
-    { name: 'validUntil', type: 'uint256' },
   ],
 }
 const src = readFileSync(join(SRC, 'eip712.ts'), 'utf8')
@@ -47,10 +46,20 @@ for (const n of [
   "version: '1'",
   "Ticket: [{ name: 'eventId', type: 'uint256' }]",
   "{ name: 'attendee', type: 'address' }",
-  "{ name: 'validUntil', type: 'uint256' }",
 ]) {
   if (!src.includes(n)) throw new Error(`eip712.ts drift: source no longer contains ${n}`)
 }
+// The Presence struct must have exactly the two members above - pin the exact
+// membership, not just needles: any extra member (validUntil back, a nonce),
+// a removed member, or a reorder is wire drift.
+const presenceBlock = src.match(/Presence:\s*\[([^\]]*)\]/s)?.[1] ?? ''
+const members = [...presenceBlock.matchAll(/\{[^}]*\}/g)].map((m) => m[0].replace(/\s+/g, ''))
+if (
+  members.length !== 2 ||
+  members[0] !== "{name:'eventId',type:'uint256'}" ||
+  members[1] !== "{name:'attendee',type:'address'}"
+)
+  throw new Error(`eip712.ts drift: Presence members are [${members.join(', ')}], expected exactly [eventId, attendee]`)
 
 // anvil well-known dev keys (local only).
 const PK = {
@@ -94,8 +103,8 @@ async function expectRevert(needle, fn) {
 const status = (e, a) => pub.readContract({ address: CONTRACT, abi, functionName: 'attendees', args: [e, a] })
 const signTicket = (a, eventId) =>
   wallet(a).signTypedData({ account: a, domain: DOMAIN, types: TICKET_TYPES, primaryType: 'Ticket', message: { eventId } })
-const signPresence = (a, eventId, attendee, validUntil) =>
-  wallet(a).signTypedData({ account: a, domain: DOMAIN, types: PRESENCE_TYPES, primaryType: 'Presence', message: { eventId, attendee, validUntil } })
+const signPresence = (a, eventId, attendee) =>
+  wallet(a).signTypedData({ account: a, domain: DOMAIN, types: PRESENCE_TYPES, primaryType: 'Presence', message: { eventId, attendee } })
 
 async function main() {
   const now = Number((await pub.getBlock()).timestamp)
@@ -106,44 +115,44 @@ async function main() {
   await send(acct.att1, 'register', [eid], parseEther('1'))
   await send(acct.att2, 'register', [eid], parseEther('1'))
   await mine(start)
-  const validUntil = BigInt(start + 86400)
 
   {
     const t = await signTicket(acct.att1, eid)
-    const p = await signPresence(acct.org, eid, acct.att1.address, validUntil)
-    await send(acct.relayer, 'checkInWithProof', [eid, acct.att1.address, validUntil, t, p])
+    const p = await signPresence(acct.org, eid, acct.att1.address)
+    await send(acct.relayer, 'checkInWithProof', [eid, acct.att1.address, t, p])
     ok((await status(eid, acct.att1.address)) === 3n, 'checkInWithProof accepted (relayer-submitted)')
   }
   {
     await send(acct.org, 'addOperator', [eid, acct.operator.address])
     const t = await signTicket(acct.att2, eid)
-    const p = await signPresence(acct.operator, eid, acct.att2.address, validUntil)
-    await send(acct.relayer, 'checkInBatchWithProofs', [eid, [acct.att2.address], [validUntil], [t], [p]])
+    const p = await signPresence(acct.operator, eid, acct.att2.address)
+    await send(acct.relayer, 'checkInBatchWithProofs', [eid, [acct.att2.address], [t], [p]])
     ok((await status(eid, acct.att2.address)) === 3n, 'operator-signed batch accepted')
   }
   {
     const t = await signTicket(acct.att2, eid) // att2 signs, claims att1
-    const p = await signPresence(acct.org, eid, acct.att1.address, validUntil)
-    await expectRevert('TicketSignerMismatch', () => send(acct.relayer, 'checkInWithProof', [eid, acct.att1.address, validUntil, t, p]))
+    const p = await signPresence(acct.org, eid, acct.att1.address)
+    await expectRevert('TicketSignerMismatch', () => send(acct.relayer, 'checkInWithProof', [eid, acct.att1.address, t, p]))
   }
   {
     const other = { ...DOMAIN, verifyingContract: '0x000000000000000000000000000000000000dEaD' }
     const t = await wallet(acct.att1).signTypedData({ account: acct.att1, domain: other, types: TICKET_TYPES, primaryType: 'Ticket', message: { eventId: eid } })
-    const p = await signPresence(acct.org, eid, acct.att1.address, validUntil)
-    await expectRevert('TicketSignerMismatch', () => send(acct.relayer, 'checkInWithProof', [eid, acct.att1.address, validUntil, t, p]))
+    const p = await signPresence(acct.org, eid, acct.att1.address)
+    await expectRevert('TicketSignerMismatch', () => send(acct.relayer, 'checkInWithProof', [eid, acct.att1.address, t, p]))
   }
   {
+    // A proof has no expiry of its own: past the dispute window the event is
+    // Settled and the state gate is what rejects it.
     const now2 = Number((await pub.getBlock()).timestamp)
     const start2 = now2 + 2 * 86400
     await send(acct.org, 'createEvent', [parseEther('1'), BigInt(now2 + 86400), BigInt(start2), BigInt(start2 + 86400), 86400n, 0n, 'ipfs://e2e2'])
     const eid2 = await pub.readContract({ address: CONTRACT, abi, functionName: 'eventCount', args: [] })
     await send(acct.att1, 'register', [eid2], parseEther('1'))
     await mine(start2)
-    const vu = BigInt(start2 + 3600)
     const t = await signTicket(acct.att1, eid2)
-    const p = await signPresence(acct.org, eid2, acct.att1.address, vu)
-    await mine(Number(vu) + 1) // past the window (still Active/Dispute)
-    await expectRevert('ProofExpired', () => send(acct.relayer, 'checkInWithProof', [eid2, acct.att1.address, vu, t, p]))
+    const p = await signPresence(acct.org, eid2, acct.att1.address)
+    await mine(start2 + 2 * 86400 + 1) // past eventEnd + disputePeriod: Settled
+    await expectRevert('CheckInWindowClosed', () => send(acct.relayer, 'checkInWithProof', [eid2, acct.att1.address, t, p]))
   }
 
   // Mailbox roundtrip (skipped if the relay is not running).
@@ -151,10 +160,9 @@ async function main() {
   if (!health) {
     console.log(`  skip: mailbox not reachable at ${MAILBOX} (start it with: node mailbox/server.mjs)`)
   } else {
-    const vu = BigInt(start + 86400)
     const t = await signTicket(acct.att1, eid)
-    const p = await signPresence(acct.org, eid, acct.att1.address, vu)
-    const voucher = { eventId: eid.toString(), attendee: acct.att1.address, validUntil: vu.toString(), ticketSig: t, presenceSig: p, chainId: '31337', contract: CONTRACT }
+    const p = await signPresence(acct.org, eid, acct.att1.address)
+    const voucher = { eventId: eid.toString(), attendee: acct.att1.address, ticketSig: t, presenceSig: p, chainId: '31337', contract: CONTRACT }
     const post = await fetch(`${MAILBOX}/vouchers`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(voucher) })
     ok(post.ok, 'mailbox accepted the voucher')
     const back = await (await fetch(`${MAILBOX}/vouchers?eventId=${eid}&attendee=${acct.att1.address}&chainId=31337&contract=${CONTRACT}`)).json()

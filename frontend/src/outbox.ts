@@ -17,7 +17,6 @@ export type TicketVoucher = { eventId: string; attendee: string; ticketSig: stri
 export type Voucher = {
   eventId: string
   attendee: string
-  validUntil: string
   ticketSig: string
   presenceSig: string
   chainId: string

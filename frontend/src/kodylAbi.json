@@ -180,11 +180,6 @@
         "internalType": "address[]"
       },
       {
-        "name": "validUntils",
-        "type": "uint256[]",
-        "internalType": "uint256[]"
-      },
-      {
         "name": "ticketSigs",
         "type": "bytes[]",
         "internalType": "bytes[]"
@@ -211,11 +206,6 @@
         "name": "attendee",
         "type": "address",
         "internalType": "address"
-      },
-      {
-        "name": "validUntil",
-        "type": "uint256",
-        "internalType": "uint256"
       },
       {
         "name": "ticketSig",
@@ -1052,11 +1042,6 @@
   {
     "type": "error",
     "name": "ProofArrayMismatch",
-    "inputs": []
-  },
-  {
-    "type": "error",
-    "name": "ProofExpired",
     "inputs": []
   },
   {

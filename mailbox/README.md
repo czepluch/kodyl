@@ -3,8 +3,8 @@
 A dumb, trust-free relay for proof-based check-in. The door operator
 countersigns a `Presence` attestation offline (no signal, no gas needed at the
 venue); this service carries that half to the attendee - or to a relayer - so
-anyone can submit the `Ticket` + `Presence` pair on-chain within the settlement
-window.
+anyone can submit the `Ticket` + `Presence` pair on-chain while check-in is
+open (through the dispute window).
 
 It only stores and forwards. It **cannot check anyone in**: the Kodyl contract
 verifies both signatures on-chain, so a forged or garbage voucher is rejected
@@ -27,7 +27,7 @@ to `server.mjs` (gitignored): it survives restarts and nothing more.
 
 All voucher fields are strings on the wire (bigints as decimal strings, the
 frontend convention). A voucher is
-`{ eventId, attendee, validUntil, ticketSig, presenceSig, chainId, contract }`.
+`{ eventId, attendee, ticketSig, presenceSig, chainId, contract }`.
 Signatures are 65-byte `0x`-prefixed hex (`r || s || v`); `attendee` and
 `contract` are 20-byte hex addresses.
 
@@ -55,7 +55,7 @@ authority on who checked in. It is not hardened against **spam**. Anyone can
 The production hardening step, deliberately not implemented here to keep the
 service dependency-free, is a spam gate: before storing, recover the
 `Presence` signature's signer (EIP-712 digest over
-`Presence(uint256 eventId,address attendee,uint256 validUntil)`, domain name
+`Presence(uint256 eventId,address attendee)`, domain name
 `Kodyl` version `1`, the posted `chainId` and `contract`) and reject the
 voucher unless that signer is the event organizer or an on-chain-authorized
 operator (`isOperator(eventId, signer)`). That needs an ECDSA/EIP-712 library
@@ -65,4 +65,4 @@ nothing a spammer stores can check a non-attendee in.
 
 Other steps a real deployment would add (all out of scope here): rate limiting,
 a bound on the store size with eviction, TLS termination, and dropping vouchers
-whose `validUntil` is already in the past on read.
+for events whose dispute window has already closed.

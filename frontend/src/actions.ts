@@ -41,7 +41,6 @@ const FRIENDLY: Record<string, (args: readonly unknown[]) => string> = {
   // Proof-based check-in.
   TicketSignerMismatch: () => 'The ticket signature does not match the claimed attendee.',
   PresenceSignerUnauthorized: () => 'The presence signature is not from the organizer or an authorized operator.',
-  ProofExpired: () => 'This check-in proof has expired (its 24-hour window has passed).',
   InvalidSignatureLength: () => 'A signature is malformed (it must be 65 bytes).',
   ProofArrayMismatch: () => 'The batch proof arrays have mismatched lengths.',
   MalleableSignatureRejected: () => 'The signature was rejected as malleable (high-s form).',

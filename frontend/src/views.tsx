@@ -7,7 +7,7 @@ import { type RosterEntry, getRoster } from './logs'
 import { encodeMetadata, useMetadata } from './metadata'
 import { to } from './router'
 import { fmtDuration, fmtEth, fmtTime, shortAddr, toLocalInput } from './format'
-import { EventActions, EventCard, JumpButton, StateBadge, isOrganizer, nextPhaseTs, payoutSwept } from './components'
+import { CheckInBanner, EventActions, EventCard, JumpButton, StateBadge, isOrganizer, nextPhaseTs, payoutSwept } from './components'
 
 const DAY = 86400
 const MIN_START_AHEAD = 3 * 3600
@@ -70,6 +70,7 @@ export function EventPage({ id }: { id: bigint }) {
   return (
     <div className="detail">
       <a className="back" href={to('/')}>&larr; All events</a>
+      <CheckInBanner ev={ev} />
       <div className="card-head">
         <h2>#{ev.id.toString()} &middot; {meta ? meta.name : '…'}</h2>
         <div className="head-right">
@@ -157,6 +158,11 @@ export function MyTickets() {
 
   return (
     <>
+      {/* One reminder banner per at-risk event (the component gates itself:
+          still Registered, check-in open); hard to miss above the sections. */}
+      {upcoming.map((ev) => (
+        <CheckInBanner key={ev.id.toString()} ev={ev} showEvent />
+      ))}
       <Section title="Action needed" events={toClaim} empty="Nothing to claim." />
       <Section title="Upcoming" events={upcoming} empty="No upcoming events." />
       <Section title="Past" events={past} empty="" />

@@ -125,10 +125,9 @@ test also cross-checks the contract's hand-rolled hashing.
 |---|---|
 | Single-proof happy path, submitted by an unrelated relayer (not the organizer) | test_proofCheckIn_happyPath_submittedByAnyone |
 | Proof check-in succeeds during Dispute (window is Active + Dispute) | test_proofCheckIn_succeedsDuringDispute |
-| Batch succeeds at the inclusive Dispute back edge (eventEnd + disputePeriod) | test_proofBatch_succeedsAtDisputeBackEdge |
+| Batch succeeds at the inclusive Dispute back edge (eventEnd + disputePeriod); one second later the same proof reverts CheckInWindowClosed - the dispute gate is the sole time bound on a proof | test_proofBatch_succeedsAtDisputeBackEdge |
 | Replaying a consumed proof is a silent no-op (checkedInCount unchanged) | test_proofCheckIn_replayIsSilentNoOp |
 | Valid proofs for a never-registered address are a silent no-op | test_proofCheckIn_notRegisteredIsSilentSkip |
-| Expiry boundary: t == validUntil submits, t == validUntil + 1 reverts ProofExpired | test_proofCheckIn_expiryBoundary |
 | Wrong ticket signer reverts TicketSignerMismatch | test_proofCheckIn_wrongTicketSignerReverts |
 | Ticket signed for a different event reverts TicketSignerMismatch | test_proofCheckIn_ticketForOtherEventReverts |
 | Self-signed / non-operator presence reverts PresenceSignerUnauthorized; a presence bound to A cannot check in B | test_proofCheckIn_unauthorizedPresenceReverts |
@@ -144,7 +143,6 @@ test also cross-checks the contract's hand-rolled hashing.
 | Batch happy path mixed with an already-checked-in no-op | test_proofBatch_happyPath_mixedWithNoOp |
 | One bumpCheckedIn per external call, not per attendee (no storage slot written twice) | test_proofBatch_oneBumpCheckedInPerCall |
 | A bad signature reverts the whole batch atomically (an earlier valid entry is not applied) | test_proofBatch_badSignatureRevertsWholeBatch |
-| An expired entry at a non-zero index reverts the whole batch (per-entry validUntil, not validUntils[0]) | test_proofBatch_expiredEntryAtNonZeroIndexReverts |
 | Array-length mismatch reverts ProofArrayMismatch | test_proofBatch_arrayMismatchReverts |
 | Over-cap batch reverts BatchTooLarge before any signature work | test_proofBatch_capBatchTooLarge |
 | Empty batch is a no-op | test_proofBatch_emptyIsNoOp |

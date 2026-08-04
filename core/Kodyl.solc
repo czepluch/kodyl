@@ -142,13 +142,12 @@ function hashTicket(eid : uint256) -> bytes32 {
     return keccak256_(concat(typeHash, bytes32(Typedef.rep(eid))));
 }
 
-function hashPresence(eid : uint256, attendee : address, validUntil : uint256) -> bytes32 {
+function hashPresence(eid : uint256, attendee : address) -> bytes32 {
     let typeHash = bytes32(
-        keccakLit("Presence(uint256 eventId,address attendee,uint256 validUntil)"));
+        keccakLit("Presence(uint256 eventId,address attendee)"));
     return keccak256_(concat(
         typeHash,
-        concat(bytes32(Typedef.rep(eid)),
-               concat(bytes32(Typedef.rep(attendee)), bytes32(Typedef.rep(validUntil))))
+        concat(bytes32(Typedef.rep(eid)), bytes32(Typedef.rep(attendee)))
     ));
 }
 
@@ -516,22 +515,20 @@ contract Kodyl {
     // --- proof-based check-in ---
     // Two EIP-712 signatures replace the organizer transaction: a Ticket
     // signed by the attendee (timeless consent) and a Presence countersigned
-    // at the door by the organizer or an operator (carries the settlement
-    // window). ANYONE may submit the pair within the window - a relayer, the
-    // door device once it regains signal, or the attendee themselves.
+    // at the door by the organizer or an operator. ANYONE may submit the pair
+    // while check-in is open (requireCheckInOpen in the entry points: the
+    // dispute window is the only time bound) - a relayer, the door device
+    // once it regains signal, or the attendee themselves.
 
-    // One Ticket + Presence pair. Reverts on anything cryptographically or
-    // temporally wrong; whether the attendee's status allows the flip is the
+    // One Ticket + Presence pair. Reverts on anything cryptographically
+    // wrong; whether the attendee's status allows the flip is the
     // caller's concern (checkInInner skips silently). recoverStrict returns a
     // real signer or reverts (MalleableSignatureRejected / ECRecoverFailed) -
     // never a stale scratch word - so no comparison here sees garbage. The
     // domain separator is passed in so a batch hashes it once.
     function verifyProof(eid : uint256, org : address, dom : bytes32,
-                         attendee : address, validUntil : uint256,
+                         attendee : address,
                          ticketSig : memory(bytes), presenceSig : memory(bytes)) -> () {
-        // Inclusive boundary, consistent with the deadline convention:
-        // t == validUntil still submits.
-        requireK(timeNow() <= validUntil, "ProofExpired()");
         match splitSig(ticketSig) {
         | Sig(r, s, v) =>
             requireK(recoverStrict(eip712Digest(dom, hashTicket(eid)), v, r, s) == attendee,
@@ -540,7 +537,7 @@ contract Kodyl {
         match splitSig(presenceSig) {
         | Sig(r, s, v) =>
             let signer =
-                recoverStrict(eip712Digest(dom, hashPresence(eid, attendee, validUntil)), v, r, s);
+                recoverStrict(eip712Digest(dom, hashPresence(eid, attendee)), v, r, s);
             // No short-circuit in the language - both operands always
             // evaluate; both are pure reads, so the fold is safe.
             requireK(signer == org || operatorsM[eid][signer],
@@ -548,21 +545,21 @@ contract Kodyl {
         }
     }
 
-    public function checkInWithProof(eid : uint256, attendee : address, validUntil : uint256,
+    public function checkInWithProof(eid : uint256, attendee : address,
                                      ticketSig : memory(bytes), presenceSig : memory(bytes)) -> () {
         match eventsRec[eid] {
         | EventRec.NoEvent => revertNotFound();
         | EventRec.Ev(org, dep, deadline, start, end_, dispute, cap) =>
             requireCheckInOpen(cancelledM[eid], start, end_, dispute);
-            verifyProof(eid, org, domainSep(), attendee, validUntil, ticketSig, presenceSig);
+            verifyProof(eid, org, domainSep(), attendee, ticketSig, presenceSig);
             bumpCheckedIn(eid, checkInInner(eid, attendee));
         }
     }
 
     // Batch semantics mirror checkInBatch: STATUS-based skips are silent
-    // no-ops (already checked in / not registered), but a bad signature,
-    // unauthorized presence signer, or expired proof REVERTS the whole batch
-    // - that is a malformed submission, not benign state drift. The typed
+    // no-ops (already checked in / not registered), but a bad signature or
+    // unauthorized presence signer REVERTS the whole batch - that is a
+    // malformed submission, not benign state drift. The typed
     // calldata-array parameters decode lazily (the post-1950e707 path); the
     // hand-decoded checkInBatch fallback shows what this required before.
     // The first array is NOT named attendees: a parameter sharing a public
@@ -572,7 +569,6 @@ contract Kodyl {
     public function checkInBatchWithProofs(
         eid : uint256,
         toCheck : calldata(array(address)),
-        validUntils : calldata(array(uint256)),
         ticketSigs : calldata(array(memory(bytes))),
         presenceSigs : calldata(array(memory(bytes)))
     ) -> () {
@@ -581,7 +577,6 @@ contract Kodyl {
         | EventRec.Ev(org, dep, deadline, start, end_, dispute, cap) =>
             requireCheckInOpen(cancelledM[eid], start, end_, dispute);
             let n = toCheck.length();
-            requireK(validUntils.length() == n, "ProofArrayMismatch()");
             requireK(ticketSigs.length() == n, "ProofArrayMismatch()");
             requireK(presenceSigs.length() == n, "ProofArrayMismatch()");
             if (n > maxBatchSize()) {
@@ -595,8 +590,7 @@ contract Kodyl {
                 // check and address decode each time, so toCheck[i] twice is
                 // wasted work.
                 let who = toCheck[i];
-                verifyProof(eid, org, dom, who, validUntils[i],
-                            ticketSigs[i], presenceSigs[i]);
+                verifyProof(eid, org, dom, who, ticketSigs[i], presenceSigs[i]);
                 flips = flips + checkInInner(eid, who);
             }
             bumpCheckedIn(eid, flips);

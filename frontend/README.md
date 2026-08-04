@@ -71,20 +71,26 @@ The door is decoupled from the on-chain write by two EIP-712 signatures (see
 2. **Organizer** (account 0): on the event page, open the check-in **Door** tab,
    **Scan** the QR (or paste the JSON). The app verifies the ticket signer with
    `recoverTypedDataAddress` and the roster status, then you **countersign**
-   `Presence` (valid 24 h). **Submit N on-chain** sends `checkInWithProof` (one)
+   `Presence`. **Submit N on-chain** sends `checkInWithProof` (one)
    or `checkInBatchWithProofs` (several); the roster flips to CheckedIn.
-3. **Self-rescue**: if the door countersigned but never submitted, the attendee
-   sees **Finalize check-in** (the voucher arrived via the mailbox) and submits
-   it themselves. Fast-forward past the 24 h window and the UI marks the proof
-   expired client-side: the self-rescue button disables with "Check-in proof
-   expired", and the Door flags such pending vouchers as expired and excludes
-   them from a batch. (The contract's own `ProofExpired` revert, decoded by the
-   FRIENDLY error map, is the backstop if an expired proof is submitted anyway.)
+3. **Reminder banner + self-rescue**: a warning banner at the top of My
+   tickets (per event) and on the event page warns a registered attendee whose
+   check-in is not on-chain yet. If the door countersigned but never
+   submitted, the banner carries **Confirm check-in on-chain** (the voucher
+   arrived via the mailbox) so the attendee submits it themselves - during the
+   event or the dispute window; if the event has ended with no voucher, it
+   says to contact the organizer before the dispute window closes. (While the
+   event is running and no voucher exists it stays quiet - showing the ticket
+   at the door is the normal path.) A proof has no expiry of its own - it
+   submits any time until the dispute window closes check-in
+   (`CheckInWindowClosed` on-chain after that, decoded by the FRIENDLY error
+   map).
 
 The on-chain and mailbox layers of this flow are covered by an automated check,
 `scripts/verify-proof-e2e.mjs`: viem signs with the exact `eip712.ts`
 domain/types and the deployed contract accepts the pair (relayer-submitted and
-operator-signed batch), rejects wrong-signer / wrong-domain / expired, and the
+operator-signed batch), rejects wrong-signer / wrong-domain, closes at the
+dispute-window edge (`CheckInWindowClosed`), and the
 mailbox roundtrips. Run it from `frontend/` against a running anvil + deploy
 (and optionally the mailbox): `node scripts/verify-proof-e2e.mjs`. The UI
 click-path above is the manual half.
@@ -104,7 +110,7 @@ click-path above is the manual half.
 | `metadata.ts` | `EventMeta`, `encodeMetadata`, `resolveMetadata` |
 | `router.ts` | tiny hash router |
 | `ctx.ts` | shared app context (data + tx runner) |
-| `components.tsx` | nav, identity bar, event card/actions, ticket + Door + self-rescue, demo drawer |
+| `components.tsx` | nav, identity bar, event card/actions, ticket + Door, check-in reminder banner (self-rescue), demo drawer |
 | `views.tsx` | Discover / Event / My tickets / Organize |
 | `App.tsx` | shell: providers, layout, route switch, activity feed |
 
