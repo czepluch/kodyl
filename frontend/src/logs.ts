@@ -159,6 +159,29 @@ export async function getRoster(eid: bigint): Promise<RosterEntry[]> {
   return result
 }
 
+// Current operator set for one event, reconstructed from OperatorSet logs:
+// latest enabled state wins per operator address (the roster's latest-wins
+// pattern), keeping only those still enabled. isOperator is a point query and
+// the contract has no enumeration, so the logs are the only way to list.
+const operatorsCache = new Map<string, { version: number; result: `0x${string}`[] }>()
+
+export async function getOperators(eid: bigint): Promise<`0x${string}`[]> {
+  await ensureSynced()
+  const key = eid.toString()
+  const hit = operatorsCache.get(key)
+  if (hit && hit.version === store.version) return hit.result
+  const latest = new Map<string, { address: `0x${string}`; enabled: boolean }>()
+  for (const l of store.logs) {
+    if (l.eventName !== 'OperatorSet') continue
+    if ((l.args.eventId as bigint | undefined) !== eid) continue
+    const operator = l.args.operator as `0x${string}` | undefined
+    if (operator) latest.set(operator.toLowerCase(), { address: operator, enabled: Boolean(l.args.enabled) })
+  }
+  const result = [...latest.values()].filter((o) => o.enabled).map((o) => o.address)
+  operatorsCache.set(key, { version: store.version, result })
+  return result
+}
+
 export type Activity = {
   eventName: string
   eventId?: bigint

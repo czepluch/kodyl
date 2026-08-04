@@ -509,6 +509,7 @@ What exists:
 - **Structured metadata** encoded into on-chain `data:` URIs behind a single resolver seam that also understands `http(s)` and `ipfs://`
 - **Proof-based check-in**: an attendee signs a `Ticket` once and shows it as a QR code or copyable text; the organizer or an operator scans/pastes it in a Door tab, countersigns `Presence`, and submits the pair (or a stranded attendee self-rescues from the mailbox relay). The bundled `mailbox/` service (zero-dependency Node HTTP relay) carries the operator's half to the attendee; it is trust-free, since the contract verifies both signatures
 - **Check-in reminder banner**: a prominent warning banner (top of My tickets, per event, and on the event page) for a still-registered attendee - "confirm your waiting check-in on-chain" with the submit button whenever a countersigned voucher waits in the mailbox, or "contact the organizer before the dispute window closes" once the event has ended with no voucher. During the event with no voucher it stays quiet (showing the ticket at the door is the normal path)
+- **Operators management**: the organizer's event page carries a Door operators panel (add / remove / list, the current set reconstructed from `OperatorSet` logs); an appointed operator sees the Door on the event page and countersigns with their own key
 
 Still aspirational (tracked in `frontend/ROLES-PLAN.md`): an edit-metadata UI, a `setMaintainer` control, real IPFS metadata hosting, search/filters, share links, calendar export, and an indexer if log-scanning gets slow.
 

@@ -7,7 +7,7 @@ import { type RosterEntry, getRoster } from './logs'
 import { encodeMetadata, useMetadata } from './metadata'
 import { to } from './router'
 import { fmtDuration, fmtEth, fmtTime, shortAddr, toLocalInput } from './format'
-import { CheckInBanner, EventActions, EventCard, JumpButton, StateBadge, isOrganizer, nextPhaseTs, payoutSwept } from './components'
+import { CheckInBanner, EventActions, EventCard, JumpButton, OperatorsPanel, StateBadge, isOrganizer, nextPhaseTs, payoutSwept } from './components'
 
 const DAY = 86400
 const MIN_START_AHEAD = 3 * 3600
@@ -112,6 +112,9 @@ export function EventPage({ id }: { id: bigint }) {
       </div>
 
       <EventActions ev={ev} roster={roster} />
+
+      {/* Any state: operators can be appointed before or during the event. */}
+      {isOrganizer(ev, session.address) && <OperatorsPanel ev={ev} />}
 
       <h3 className="roster-h">Attendees <span className="muted">(from event logs)</span></h3>
       {roster === null ? (

@@ -85,6 +85,15 @@ The door is decoupled from the on-chain write by two EIP-712 signatures (see
    submits any time until the dispute window closes check-in
    (`CheckInWindowClosed` on-chain after that, decoded by the FRIENDLY error
    map).
+4. **Operators**: on the event page, the organizer's **Door operators** panel
+   appoints and revokes door operators (`addOperator` / `removeOperator`; the
+   current set is reconstructed from `OperatorSet` logs - the contract has no
+   enumeration). Switch identity to an appointed operator and the event page
+   shows the Door: they countersign `Presence` with their own key and submit,
+   accepted exactly like the organizer's attestation. After removal a fresh
+   attestation from them is rejected (`PresenceSignerUnauthorized`).
+   Previously operator-signed check-in was reachable only via `cast` or the
+   e2e script.
 
 The on-chain and mailbox layers of this flow are covered by an automated check,
 `scripts/verify-proof-e2e.mjs`: viem signs with the exact `eip712.ts`
@@ -106,11 +115,11 @@ click-path above is the manual half.
 | `mailbox.ts` | voucher relay client (`postVoucher` / `fetchVoucher`) |
 | `qr.tsx` | QR generation (`qrcode`) and camera scanning (`jsqr`) |
 | `useKodyl.ts` | per-event state via a viem public client, block-watched |
-| `logs.ts` | roster + activity reconstructed from event logs |
+| `logs.ts` | roster + activity + operator set reconstructed from event logs |
 | `metadata.ts` | `EventMeta`, `encodeMetadata`, `resolveMetadata` |
 | `router.ts` | tiny hash router |
 | `ctx.ts` | shared app context (data + tx runner) |
-| `components.tsx` | nav, identity bar, event card/actions, ticket + Door, check-in reminder banner (self-rescue), demo drawer |
+| `components.tsx` | nav, identity bar, event card/actions, ticket + Door, check-in reminder banner (self-rescue), operators panel, demo drawer |
 | `views.tsx` | Discover / Event / My tickets / Organize |
 | `App.tsx` | shell: providers, layout, route switch, activity feed |
 

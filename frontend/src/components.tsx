@@ -3,7 +3,7 @@ import { type Hex, isAddress, recoverTypedDataAddress } from 'viem'
 import { ACCOUNTS, CONTRACT, STATE_LABELS, STATUS_LABELS, chain, isLocalChain } from './config'
 import { useApp } from './ctx'
 import { type EventView } from './useKodyl'
-import { type RosterEntry } from './logs'
+import { type RosterEntry, getOperators } from './logs'
 import { warpBy, warpTo } from './actions'
 import { useMetadata } from './metadata'
 import { type Route, to } from './router'
@@ -104,12 +104,43 @@ export function EventTitle({ uri, id }: { uri: string; id: bigint }) {
 
 // --- contextual actions (attendee + organizer) ---
 
+// Whether `me` is an appointed door operator of this event, from the same
+// OperatorSet log store the operators panel lists (version-cached, so an
+// unchanged store costs no extra RPC). Skipped for the organizer, whose
+// authority is direct; a just-appointed operator sees the door on the next
+// log sync.
+function useAmOperator(eid: bigint, me: string, organizer: boolean): boolean {
+  const { now } = useApp()
+  const [am, setAm] = useState(false)
+  // Identity or event changed: drop the stale answer synchronously, so the
+  // previous viewer's operator status never renders for the next one while
+  // the async re-check is in flight.
+  useEffect(() => setAm(false), [eid, me])
+  useEffect(() => {
+    if (organizer) return
+    let live = true
+    getOperators(eid)
+      .then((ops) => live && setAm(ops.some((o) => o.toLowerCase() === me.toLowerCase())))
+      // A failed sync is not an answer: keep the last known value, or an
+      // operator's whole Door would unmount (losing its local state) on any
+      // transient RPC blip.
+      .catch(() => {})
+    return () => {
+      live = false
+    }
+  }, [eid, me, organizer, now])
+  return !organizer && am
+}
+
 // roster: undefined on cards (no roster fetched there), null while the event
 // page is still loading it, an array once loaded.
 export function EventActions({ ev, roster }: { ev: EventView; roster?: RosterEntry[] | null }) {
   const { session, now, busy, run } = useApp()
   const me = session.address
   const organizer = isOrganizer(ev, me)
+  // An operator runs the Door only: the roster path (checkIn/checkInBatch) is
+  // organizer-only on-chain and would revert NotOrganizer.
+  const amOperator = useAmOperator(ev.id, me, organizer)
   const full = ev.maxAttendees > 0n && ev.registeredCount >= ev.maxAttendees
   const canCancel = ev.state === 0 && ev.myStatus === 1 && !ev.cancelled && now <= Number(ev.cancellationDeadline)
   const disabled = busy || !session.connected
@@ -144,7 +175,7 @@ export function EventActions({ ev, roster }: { ev: EventView; roster?: RosterEnt
       )}
       {swept && <span className="muted">Payout was swept to the maintainer after the 30-day timeout.</span>}
 
-      {organizer &&
+      {(organizer || amOperator) &&
         (ev.state === 1 || ev.state === 2) &&
         (roster === undefined ? (
           // Cards have no roster data - check-in lives on the event page.
@@ -152,7 +183,7 @@ export function EventActions({ ev, roster }: { ev: EventView; roster?: RosterEnt
         ) : roster === null ? (
           <span className="muted">Loading roster&hellip;</span>
         ) : (
-          <CheckIn ev={ev} roster={roster} />
+          <CheckIn ev={ev} roster={roster} organizer={organizer} />
         ))}
       {organizer && ev.state === 0 && !ev.cancelled && (
         <button className="ghost" disabled={disabled} onClick={() => run('Cancel event', () => session.sendTx('cancelEvent', [ev.id]))}>
@@ -265,19 +296,29 @@ function TicketButton({ ev }: { ev: EventView }) {
 
 // Check-in area on the event page: the roster path (organizer transaction) and
 // the proof-based Door path (sign a Presence, submit anyone's pair) as tabs.
-function CheckIn({ ev, roster }: { ev: EventView; roster: RosterEntry[] }) {
-  const [tab, setTab] = useState<'roster' | 'door'>('roster')
+// An operator gets the Door alone - the roster path is organizer-only
+// on-chain, so its tab would only offer a guaranteed revert.
+function CheckIn({ ev, roster, organizer }: { ev: EventView; roster: RosterEntry[]; organizer: boolean }) {
+  const [tab, setTab] = useState<'roster' | 'door'>(organizer ? 'roster' : 'door')
+  // Losing the organizer role without unmounting (identity switch while an
+  // operator keeps the area alive) hides the Roster tab; land on the Door so
+  // the active tab always exists.
+  useEffect(() => {
+    if (!organizer) setTab('door')
+  }, [organizer])
   return (
     <div style={{ flexBasis: '100%' }}>
       <div className="tabs">
-        <button className={tab === 'roster' ? 'tab active' : 'tab'} onClick={() => setTab('roster')}>
-          Roster
-        </button>
+        {organizer && (
+          <button className={tab === 'roster' ? 'tab active' : 'tab'} onClick={() => setTab('roster')}>
+            Roster
+          </button>
+        )}
         <button className={tab === 'door' ? 'tab active' : 'tab'} onClick={() => setTab('door')}>
           Door
         </button>
       </div>
-      {tab === 'roster' ? <RosterCheckIn ev={ev} roster={roster} /> : <Door ev={ev} roster={roster} />}
+      {tab === 'roster' && organizer ? <RosterCheckIn ev={ev} roster={roster} /> : <Door ev={ev} roster={roster} />}
     </div>
   )
 }
@@ -643,6 +684,81 @@ export function CheckInBanner({ ev, showEvent = false }: { ev: EventView; showEv
         Not checked in? If you attended but were not scanned, contact the organizer before {closes} - after that,
         check-in for this event closes.
       </span>
+    </div>
+  )
+}
+
+// --- door operators (organizer's event page, any state) ---
+
+// List / appoint / revoke the event's door operators. The current set is
+// reconstructed from OperatorSet logs (getOperators): isOperator is a point
+// query and the contract has no enumeration. Appointing an operator shares
+// the organizer's full check-in authority (spec.md trust surface), so the
+// copy says exactly that.
+export function OperatorsPanel({ ev }: { ev: EventView }) {
+  const { session, now, busy, run } = useApp()
+  const [operators, setOperators] = useState<`0x${string}`[] | null>(null)
+  const [addr, setAddr] = useState('')
+
+  // Keyed on the ticking clock like the event page's roster effect:
+  // getOperators is cached by the log store version, so an unchanged store
+  // returns the same reference and the setState is a no-op render. A mined
+  // addOperator/removeOperator bumps the store on the next block and the
+  // list refreshes.
+  useEffect(() => {
+    let live = true
+    getOperators(ev.id).then((o) => live && setOperators(o)).catch(() => live && setOperators([]))
+    return () => {
+      live = false
+    }
+  }, [ev.id, now])
+
+  const typed = addr.trim()
+  const disabled = busy || !session.connected
+
+  return (
+    <div className="operators">
+      <h3 className="roster-h">Door operators <span className="muted">(from event logs)</span></h3>
+      <p className="muted" style={{ fontSize: 12, margin: '0 0 8px' }}>
+        An operator&rsquo;s Presence signature checks attendees in with your full authority - appoint accordingly.
+        Removal takes effect immediately; their earlier submitted check-ins stand.
+      </p>
+      {operators === null ? (
+        <p className="muted" style={{ fontSize: 13 }}>Loading operators&hellip;</p>
+      ) : operators.length === 0 ? (
+        <p className="muted" style={{ fontSize: 13, margin: '0 0 8px' }}>No operators appointed.</p>
+      ) : (
+        <div className="door-pending" style={{ marginTop: 0, marginBottom: 8 }}>
+          <ul>
+            {operators.map((o) => (
+              <li key={o}>
+                <code title={o}>{shortAddr(o)}</code>
+                <button
+                  className="ghost sm"
+                  disabled={disabled}
+                  onClick={() => run('Remove operator', () => session.sendTx('removeOperator', [ev.id, o]))}
+                >
+                  remove
+                </button>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+      <div className="checkin">
+        <input placeholder="0x... operator address" value={addr} onChange={(e) => setAddr(e.target.value)} />
+        <button
+          disabled={disabled || !isAddress(typed)}
+          onClick={() =>
+            run('Add operator', async () => {
+              await session.sendTx('addOperator', [ev.id, typed])
+              setAddr('')
+            })
+          }
+        >
+          Add operator
+        </button>
+      </div>
     </div>
   )
 }
