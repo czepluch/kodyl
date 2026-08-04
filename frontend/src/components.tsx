@@ -139,7 +139,7 @@ export function EventActions({ ev, roster }: { ev: EventView; roster?: RosterEnt
         </button>
       )}
       {ev.myStatus === 1 && !ev.cancelled && ev.state < 3 && <TicketButton ev={ev} />}
-      {ev.myStatus === 1 && !ev.cancelled && (ev.state === 1 || ev.state === 2) && <SelfRescue ev={ev} />}
+      {ev.myStatus === 1 && !ev.cancelled && (ev.state === 1 || ev.state === 2) && <CheckInHelp ev={ev} />}
       {ev.state === 3 && ev.myStatus === 3 && !swept && (
         <button disabled={disabled} onClick={() => run('Claim payout', () => session.sendTx('claim', [ev.id]))}>
           Claim payout
@@ -224,8 +224,9 @@ function TicketButton({ ev }: { ev: EventView }) {
       setOpen((o) => !o)
       return
     }
-    // A pure signature (no tx); run() gives the same toast + a harmless refresh.
-    run('Sign ticket', async () => {
+    // First tap signs the ticket on demand (a pure signature, no tx); run()
+    // gives a toast + a harmless refresh.
+    run('Show ticket', async () => {
       const sig = (await session.signTypedData(DOMAIN, TICKET_TYPES, 'Ticket', { eventId: ev.id })) as string
       const v: TicketVoucher = { eventId: ev.id.toString(), attendee: me, ticketSig: sig }
       saveTicket(v)
@@ -237,8 +238,13 @@ function TicketButton({ ev }: { ev: EventView }) {
   return (
     <div style={{ flexBasis: '100%' }}>
       <button className="ghost" disabled={busy || !session.connected} onClick={show}>
-        {ticket ? (open ? 'Hide ticket' : 'Show ticket') : 'Sign ticket'}
+        {ticket && open ? 'Hide ticket' : 'Show ticket'}
       </button>
+      {!ticket && (
+        <p className="muted" style={{ fontSize: 12, margin: '4px 0 0' }}>
+          Your wallet signs once to prove this ticket is yours - no gas.
+        </p>
+      )}
       {open && ticket && (
         <div className="voucher">
           <QrCode text={ticketJson(ticket)} />
@@ -432,7 +438,7 @@ function Door({ ev, roster }: { ev: EventView; roster: RosterEntry[] }) {
       addToOutbox(voucher)
       refreshPending()
       setText('')
-      setNote(`${shortAddr(attendee)} added to the pending pile.`)
+      setNote(`${shortAddr(attendee)} verified - ready to submit on-chain.`)
       postVoucher(voucher).catch(() => {}) // best-effort relay; the outbox is the record
     })
   }
@@ -526,7 +532,7 @@ function Door({ ev, roster }: { ev: EventView; roster: RosterEntry[] }) {
       {pending.length > 0 && (
         <div className="door-pending">
           <div className="door-pending-head">
-            <span>Pending presence ({pending.length})</span>
+            <span>Ready to submit ({pending.length})</span>
             <button
               disabled={busy || !session.connected || pending.every(isExpired)}
               onClick={submitAll}
@@ -552,17 +558,27 @@ function Door({ ev, roster }: { ev: EventView; roster: RosterEntry[] }) {
   )
 }
 
-// Attendee self-rescue: if the door countersigned and relayed a Presence to the
-// mailbox but never submitted, the attendee can finalize their own check-in.
-function SelfRescue({ ev }: { ev: EventView }) {
+// Attendee-side check-in help, for a still-Registered attendee during
+// Active/Dispute. Two cases:
+//  - a countersigned proof is waiting in the mailbox -> confirm it on-chain
+//    yourself (self-rescue if the door never submitted it);
+//  - no proof, and the event has ended (Dispute) -> if you were there but the
+//    door never scanned you, only the organizer can check you in, and only
+//    until the dispute window closes. Say so, with the concrete deadline.
+function CheckInHelp({ ev }: { ev: EventView }) {
   const { session, now, busy, run } = useApp()
   const me = session.address
   const [voucher, setVoucher] = useState<Voucher | null>(null)
+  const [polled, setPolled] = useState(false)
 
   // Poll the mailbox on a coarse timer (not the per-second UI clock), and
   // re-poll when the identity or event changes.
   useEffect(() => {
     let live = true
+    setPolled(false)
+    const done = () => {
+      if (live) setPolled(true)
+    }
     const poll = () =>
       fetchVoucher(ev.id, me)
         .then((v) => {
@@ -574,8 +590,9 @@ function SelfRescue({ ev }: { ev: EventView }) {
           // stays Registered). The contract still verifies the signatures.
           const mine = v && v.attendee?.toLowerCase() === me.toLowerCase() && v.eventId === ev.id.toString()
           setVoucher(mine ? v : null)
+          done()
         })
-        .catch(() => {})
+        .catch(done)
     poll()
     const t = setInterval(poll, 10000)
     return () => {
@@ -584,25 +601,48 @@ function SelfRescue({ ev }: { ev: EventView }) {
     }
   }, [ev.id, me])
 
-  if (!voucher) return null
-  const expired = now > 0 && Number(voucher.validUntil) < now
+  // A countersigned proof is waiting: finalize it on-chain (anyone may submit).
+  if (voucher) {
+    const expired = now > 0 && Number(voucher.validUntil) < now
+    return (
+      <div style={{ flexBasis: '100%' }}>
+        <button
+          disabled={busy || !session.connected || expired}
+          onClick={() =>
+            run('Confirm check-in on-chain', () =>
+              session.sendTx('checkInWithProof', [
+                BigInt(voucher.eventId),
+                voucher.attendee as `0x${string}`,
+                BigInt(voucher.validUntil),
+                voucher.ticketSig as Hex,
+                voucher.presenceSig as Hex,
+              ]),
+            )
+          }
+        >
+          {expired ? 'Door check-in expired - ask to be re-scanned' : 'Confirm check-in on-chain'}
+        </button>
+        {!expired && (
+          <p className="muted" style={{ fontSize: 12, margin: '4px 0 0' }}>
+            The door signed you in. Organizers usually submit this shortly after the event ends - use this only if your
+            check-in has not appeared yet.
+          </p>
+        )}
+      </div>
+    )
+  }
+
+  // No proof waiting. Once the event has ended (Dispute), a still-registered
+  // attendee who was there but never scanned can only be checked in by the
+  // organizer, and only until the dispute window closes. During Active they
+  // just show their ticket, so stay quiet then; and wait for the first poll to
+  // avoid flashing this before a waiting proof loads.
+  if (!polled || ev.state !== 2) return null
   return (
-    <button
-      disabled={busy || !session.connected || expired}
-      onClick={() =>
-        run('Finalize check-in', () =>
-          session.sendTx('checkInWithProof', [
-            BigInt(voucher.eventId),
-            voucher.attendee as `0x${string}`,
-            BigInt(voucher.validUntil),
-            voucher.ticketSig as Hex,
-            voucher.presenceSig as Hex,
-          ]),
-        )
-      }
-    >
-      {expired ? 'Check-in proof expired' : 'Finalize check-in (proof waiting)'}
-    </button>
+    <p className="muted" style={{ flexBasis: '100%', fontSize: 12, margin: 0 }}>
+      You are not checked in yet. If you attended but the door did not scan you, contact the organizer before{' '}
+      {fmtTime(ev.eventEnd + ev.disputePeriod)} to be checked in - after that, check-in for this event closes.
+    </p>
   )
 }
 
