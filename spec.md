@@ -452,6 +452,10 @@ What the organizer *cannot* do: change any event parameter after creation, take 
 | Forced ETH (selfdestruct, block rewards) | Cannot be rejected; absorbed by the `>=` ledger direction, no flow affected |
 | Maintainer that reverts on receive | Blocks only dust egress; recoverable via `setMaintainer` |
 
+The economics of the "not prevented" rows - exact payoffs, attacker costs, and
+on-chain footprints - are quantified in `ECONOMICS.md`, with every number
+verified against the bytecode by `test/KodylEcon.t.sol`.
+
 ## MVP Scope
 
 ### In Scope

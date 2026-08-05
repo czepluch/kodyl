@@ -171,3 +171,23 @@ surface the proof path depends on.
 | calldata(array(address)): length, indexing, ArrayOutOfBounds (0x7f52b2bf) | test_probe_calldataAddressArray |
 | calldata(array(memory(bytes))): dynamic elements incl. a 65-byte signature element, bounds, empty array | test_probe_calldataBytesArray |
 | calldata(array(uint256)): index, bounds, full iteration (no upstream fixture - this canary is the coverage) | test_probe_calldataUintArray |
+
+## Adversarial economics (spec.md "Trust Assumptions" / "Attack Vectors")
+
+`test/KodylEcon.t.sol` is the executable payoff matrix behind `ECONOMICS.md`:
+each strategy asserts every actor's exact ETH delta plus the footprint
+counters an indexer would see. Every number in `ECONOMICS.md` resolves here.
+
+| Claim | Test |
+|---|---|
+| Honest baseline: claimants get deposit + floor share, no-shows -d, remainder is dust | test_econ_honestBaseline |
+| Organizer sybil capture takes the whole pot; footprint 11/1/1 | test_econ_sybilCapturesWholePot |
+| Sybil capture profit is exactly nHonest * d, stake never at risk (fuzzed) | testFuzz_econ_sybilProfitExact |
+| Sybil skim dilutes each honest claimant vs the s=0 counterfactual | test_econ_sybilSkimsForfeitures |
+| Skim share floor(m*d/(c+s)), block total, and dust remainder (fuzzed) | testFuzz_econ_skimShareExact |
+| Excluding an attendee costs the organizer nothing; victim has no recourse | test_econ_exclusionGriefingIsFree |
+| Zero check-ins: whole pot sweeps to the maintainer immediately at Settled | test_econ_abandonmentRoutesPotToMaintainer |
+| The 30-day sweep takes a sleeper's full payout, reward included | test_econ_sweepTakesUnclaimedPayouts |
+| Operator-signed capture reproduces the organizer's payoffs exactly | test_econ_operatorCollusionEqualsOrganizer |
+| Maintainer-as-organizer captures every deposit alone via abandonment | test_econ_maintainerAsOrganizerSelfCapture |
+| Capacity griefing costs only lockup; freed slots have no self-service exit | test_econ_capacityGriefingCostsOnlyLockup |

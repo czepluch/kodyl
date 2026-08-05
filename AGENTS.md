@@ -90,7 +90,9 @@ rev and fails unless the committed hex/yul are byte-identical - see
    event never opens check-in - otherwise a deposit strands).
 
 `test/KodylAccounting.t.sol` and `test/KodylConservation.t.sol` cover the
-shared-custody accounting; `test/KodylInvariant.t.sol` fuzzes the ledger.
+shared-custody accounting; `test/KodylInvariant.t.sol` fuzzes the ledger;
+`test/KodylEcon.t.sol` is the executable payoff matrix behind `ECONOMICS.md`
+(adversarial strategies with exact per-actor ETH deltas).
 
 ## Core Solidity gotchas (all shimmed in core/kodyl.solc)
 

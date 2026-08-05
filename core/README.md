@@ -79,7 +79,9 @@ forge test                       # forge is a harness only (see foundry.toml)
 
 `test/Kodyl.t.sol` (83 scenarios) and `test/KodylInvariant.t.sol` (128k-call
 ledger fuzz across three concurrent events), plus `test/KodylAccounting.t.sol`
-and `test/KodylConservation.t.sol` (reentrancy + full-lifecycle conservation),
+and `test/KodylConservation.t.sol` (reentrancy + full-lifecycle conservation)
+and `test/KodylEcon.t.sol` (the adversarial-economics payoff matrix behind
+`ECONOMICS.md`: exact per-actor ETH deltas for each attack strategy),
 drive the compiled bytecode through a typed Solidity interface inside forge -
 selectors, event topics, and revert payloads are asserted byte-for-byte.
 `test/CoreProbe.t.sol` adds 14 canary tests pinning the language behaviors the
