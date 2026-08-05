@@ -123,7 +123,7 @@ async function main() {
     ok((await status(eid, acct.att1.address)) === 3n, 'checkInWithProof accepted (relayer-submitted)')
   }
   {
-    await send(acct.org, 'addOperator', [eid, acct.operator.address])
+    await send(acct.org, 'setOperator', [eid, acct.operator.address, true])
     const t = await signTicket(acct.att2, eid)
     const p = await signPresence(acct.operator, eid, acct.att2.address)
     await send(acct.relayer, 'checkInBatchWithProofs', [eid, [acct.att2.address], [t], [p]])

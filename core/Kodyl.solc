@@ -479,15 +479,11 @@ contract Kodyl {
 
     // --- operators (proof-based check-in) ---
     // An operator holds the same check-in attestation authority as the
-    // organizer; appointing one is a trust decision. An add/remove PAIR of
-    // public functions instead of setOperator(eid, operator, enabled): std
-    // has no calldata decoder for a bool parameter (bool returns encode
-    // fine), so a bool cannot appear in a typed public signature at the
-    // current pin. Only the public boundary is doubled - the guard, write,
-    // and event share one internal body, which takes the bool the wire could
-    // not (internal bool params work; frombool encodes it for the event).
+    // organizer; appointing one is a trust decision. The bool param decodes
+    // strictly (a calldata word above 1 reverts DirtyHigherBitsForBool in
+    // std), matching the typed address paths.
 
-    function setOperatorInner(eid : uint256, operator : address, enabled : bool) -> () {
+    public function setOperator(eid : uint256, operator : address, enabled : bool) -> () {
         match eventsRec[eid] {
         | EventRec.NoEvent => revertNotFound();
         | EventRec.Ev(org, dep, deadline, start, end_, dispute, cap) =>
@@ -496,14 +492,6 @@ contract Kodyl {
             emitLog3W1(keccakLit("OperatorSet(uint256,address,bool)"),
                        Typedef.rep(eid), Typedef.rep(operator), frombool(enabled));
         }
-    }
-
-    public function addOperator(eid : uint256, operator : address) -> () {
-        setOperatorInner(eid, operator, true);
-    }
-
-    public function removeOperator(eid : uint256, operator : address) -> () {
-        setOperatorInner(eid, operator, false);
     }
 
     // Raw-mapping getter, zero-tier like the stat getters: false for unknown

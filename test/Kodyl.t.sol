@@ -1315,7 +1315,7 @@ contract KodylTest is Test {
         vm.expectEmit(true, true, false, true);
         emit OperatorSet(eid, doorOp, true);
         vm.prank(org);
-        k.addOperator(eid, doorOp);
+        k.setOperator(eid, doorOp, true);
         assertTrue(k.isOperator(eid, doorOp));
 
         // Operator-countersigned presence checks dana in.
@@ -1328,11 +1328,11 @@ contract KodylTest is Test {
         (address doorOp, uint256 doorPk) = makeAddrAndKey("doorOp");
 
         vm.prank(org);
-        k.addOperator(eid, doorOp);
+        k.setOperator(eid, doorOp, true);
         vm.expectEmit(true, true, false, true);
         emit OperatorSet(eid, doorOp, false);
         vm.prank(org);
-        k.removeOperator(eid, doorOp);
+        k.setOperator(eid, doorOp, false);
         assertFalse(k.isOperator(eid, doorOp));
 
         // The revoked operator's attestation no longer authorizes.
@@ -1344,18 +1344,38 @@ contract KodylTest is Test {
         uint256 eid = _create();
         vm.prank(alice);
         vm.expectRevert(KodylAbi.NotOrganizer.selector);
-        k.addOperator(eid, bob);
+        k.setOperator(eid, bob, true);
         vm.prank(alice);
         vm.expectRevert(KodylAbi.NotOrganizer.selector);
-        k.removeOperator(eid, bob);
+        k.setOperator(eid, bob, false);
         vm.expectRevert(KodylAbi.EventNotFound.selector);
-        k.addOperator(99, bob);
+        k.setOperator(99, bob, true);
         vm.expectRevert(KodylAbi.EventNotFound.selector);
-        k.removeOperator(99, bob);
+        k.setOperator(99, bob, false);
         // Zero-tier getter: false for unknown events and unknown operators,
         // never a revert.
         assertFalse(k.isOperator(99, bob));
         assertFalse(k.isOperator(eid, bob));
+    }
+
+    function test_setOperator_dirtyBoolWordReverts() public {
+        uint256 eid = _create();
+        bytes4 sel = KodylAbi.setOperator.selector;
+        // enabled word above 1: strict decoding rejects it before the body
+        // runs, same shape as the dirty-address paths.
+        bytes memory payload = abi.encodePacked(sel, eid, uint256(uint160(bob)), uint256(2));
+        vm.prank(organizer);
+        (bool ok, bytes memory ret) = address(k).call(payload);
+        assertFalse(ok);
+        assertEq(ret, abi.encodeWithSelector(KodylAbi.DirtyHigherBitsForBool.selector));
+        assertFalse(k.isOperator(eid, bob));
+
+        // The clean word 1 goes through.
+        bytes memory clean = abi.encodePacked(sel, eid, uint256(uint160(bob)), uint256(1));
+        vm.prank(organizer);
+        (ok, ret) = address(k).call(clean);
+        assertTrue(ok);
+        assertTrue(k.isOperator(eid, bob));
     }
 
     function test_proofCheckIn_invalidSignatureLengthReverts() public {

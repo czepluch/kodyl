@@ -67,13 +67,13 @@ The direction is `>=`, not `==`: forced ETH (selfdestruct, block-reward payments
 **Organizer** (per-event, permissionless)
 - Whoever calls `createEvent` is the organizer of that event - there is no global admin
 - Checks in attendees (single or batch), or signs `Presence` for the proof-based path
-- Authorizes and revokes door operators (`addOperator`/`removeOperator`)
+- Authorizes and revokes door operators (`setOperator`)
 - Can cancel the event before it starts (entitles all registered attendees to refunds)
 - Can approve late check-ins during the dispute period
 - Can update the event's metadata URI at any time
 
 **Operator** (per-event, appointed by the organizer)
-- Authorized on-chain per event via `addOperator`; revocable via `removeOperator`
+- Authorized and revoked on-chain per event via `setOperator`
 - Can sign a valid `Presence` attestation - the **same check-in authority as the organizer**, and nothing more (cannot cancel, change parameters, or move funds)
 
 **Attendee**
@@ -302,16 +302,15 @@ cap applies as for the direct batch.
 **Operators.** An event's organizer may authorize door operators on-chain:
 
 ```solidity
-addOperator(uint256 eid, address operator)     // organizer-only, emits OperatorSet
-removeOperator(uint256 eid, address operator)   // organizer-only, emits OperatorSet
-isOperator(uint256 eid, address addr) -> bool   // zero-tier: false for unknown ids
+setOperator(uint256 eid, address operator, bool enabled)  // organizer-only, emits OperatorSet
+isOperator(uint256 eid, address addr) -> bool             // zero-tier: false for unknown ids
 ```
 
 An operator's Presence signature carries the **same check-in authority as the
-organizer's**. There is a separate `addOperator`/`removeOperator` pair rather than
-one `setOperator(eid, operator, bool)` because the Core Solidity toolchain has no
-calldata decoder for a `bool` parameter yet (a language gap, not a design choice);
-both route through one internal setter and emit `OperatorSet(uint256,address,bool)`.
+organizer's**. Every change emits `OperatorSet(uint256,address,bool)`. The
+`enabled` parameter decodes strictly: a calldata word above 1 reverts
+`DirtyHigherBitsForBool`, matching the strict address decoding on the typed
+paths.
 
 **Ticket sharing is tolerated, not marketed.** A Ticket signature can be forwarded
 to a friend - there is deliberately no anti-share binding, freshness, or liveness
@@ -433,7 +432,7 @@ No reentrancy guard: status transitions are terminal and flip before any send (C
 
 What the organizer *cannot* do: change any event parameter after creation, take custody directly (no payout path pays the organizer as such), cancel after the event starts, block a pre-deadline cancel, or block refunds on a cancelled event.
 
-**Operators inherit the check-in authority.** An authorized operator can sign a valid `Presence`, so the sybil-check-in surface above extends to every operator the organizer appoints: an operator can attest presence for a sock puppet exactly as the organizer can. **Appointing an operator is therefore a trust decision equivalent to sharing the organizer's check-in power** - not a lesser delegation. The set is on-chain and verifiable (`isOperator`, the `OperatorSet` log), and revocable at any time (`removeOperator`), so the trust is auditable and retractable, but while an operator is authorized their attestations carry full weight. What an operator still cannot do matches the organizer's own limits: no parameter changes, no direct custody, no cancellation.
+**Operators inherit the check-in authority.** An authorized operator can sign a valid `Presence`, so the sybil-check-in surface above extends to every operator the organizer appoints: an operator can attest presence for a sock puppet exactly as the organizer can. **Appointing an operator is therefore a trust decision equivalent to sharing the organizer's check-in power** - not a lesser delegation. The set is on-chain and verifiable (`isOperator`, the `OperatorSet` log), and revocable at any time (`setOperator`), so the trust is auditable and retractable, but while an operator is authorized their attestations carry full weight. What an operator still cannot do matches the organizer's own limits: no parameter changes, no direct custody, no cancellation.
 
 **Maintainer liveness.** The maintainer is assumed to accept plain ETH. A maintainer contract that reverts on receipt blocks only dust egress - `claim`, `cancel`, and `claimRefund` pay the caller and are unaffected - and the situation is self-healing via `setMaintainer`. (Validation failures in `setMaintainer` and construction reuse the `InvalidEventParameters(string)` error shape - a deliberate wire-compatibility choice, see `core/README.md`.)
 
@@ -442,7 +441,7 @@ What the organizer *cannot* do: change any event parameter after creation, take 
 | Attack | Outcome / Mitigation |
 |--------|----------------------|
 | Organizer sybil check-in (register a sock puppet, check in only it) | **Not prevented** - the sybil claims the whole pot. Economic/reputational deterrence only; future: organizer stake |
-| Operator sybil check-in (an authorized operator attests presence for a sock puppet) | **Not prevented** - same surface as the organizer; appointing an operator grants the organizer's check-in power. On-chain, auditable (`isOperator`), revocable (`removeOperator`) |
+| Operator sybil check-in (an authorized operator attests presence for a sock puppet) | **Not prevented** - same surface as the organizer; appointing an operator grants the organizer's check-in power. On-chain, auditable (`isOperator`), revocable (`setOperator`) |
 | Ticket sharing (an attendee forwards their signed `Ticket` to a friend) | **Tolerated by design** - no anti-share binding. The human at the door gates check-in: an operator signs `Presence` only after seeing a body |
 | Forged / replayed proof (wrong signer, wrong event, wrong chain) | Rejected on-chain: `TicketSignerMismatch`, `PresenceSignerUnauthorized`, or domain-mismatch (recovers a different signer). Malformed signatures revert (`MalleableSignatureRejected` / `ECRecoverFailed` / `InvalidSignatureLength`); after the dispute window every check-in reverts `CheckInWindowClosed` |
 | Organizer checks in nobody | **Not prevented** - all deposits become maintainer dust (immediately at Settled, or via the 30-day sweep). Same trust surface |
@@ -466,7 +465,7 @@ What the organizer *cannot* do: change any event parameter after creation, take 
 - [x] Re-registration after cancellation
 - [x] Manual check-in by organizer only (single and batch, max 100 per batch)
 - [x] Proof-based check-in (EIP-712 `Ticket` + `Presence`; anyone submits while check-in is open - the dispute window is the only time bound; single and batch)
-- [x] On-chain door operators per event (`addOperator`/`removeOperator`/`isOperator`)
+- [x] On-chain door operators per event (`setOperator`/`isOperator`)
 - [x] Pro-rata distribution of no-show deposits
 - [x] Dispute period for late check-in approval (bounded 1 hour to 30 days)
 - [x] Event cancellation with full refunds (before start only; refunds never expire)

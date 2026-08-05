@@ -86,7 +86,7 @@ The door is decoupled from the on-chain write by two EIP-712 signatures (see
    (`CheckInWindowClosed` on-chain after that, decoded by the FRIENDLY error
    map).
 4. **Operators**: on the event page, the organizer's **Door operators** panel
-   appoints and revokes door operators (`addOperator` / `removeOperator`; the
+   appoints and revokes door operators (`setOperator`; the
    current set is reconstructed from `OperatorSet` logs - the contract has no
    enumeration). Switch identity to an appointed operator and the event page
    shows the Door: they countersign `Presence` with their own key and submit,

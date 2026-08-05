@@ -131,9 +131,10 @@ test also cross-checks the contract's hand-rolled hashing.
 | Wrong ticket signer reverts TicketSignerMismatch | test_proofCheckIn_wrongTicketSignerReverts |
 | Ticket signed for a different event reverts TicketSignerMismatch | test_proofCheckIn_ticketForOtherEventReverts |
 | Self-signed / non-operator presence reverts PresenceSignerUnauthorized; a presence bound to A cannot check in B | test_proofCheckIn_unauthorizedPresenceReverts |
-| Operator-signed presence checks in after addOperator | test_proofCheckIn_operatorPresence |
+| Operator-signed presence checks in after setOperator | test_proofCheckIn_operatorPresence |
 | A revoked operator's presence reverts PresenceSignerUnauthorized | test_proofCheckIn_revokedOperatorReverts |
 | Operator management auth matrix: non-organizer reverts NotOrganizer, unknown event reverts EventNotFound, isOperator is zero-tier | test_operatorManagement_authMatrix |
+| A setOperator bool word above 1 reverts DirtyHigherBitsForBool (strict decode); the clean word goes through | test_setOperator_dirtyBoolWordReverts |
 | Wrong-length signature reverts InvalidSignatureLength (ticket and presence positions) | test_proofCheckIn_invalidSignatureLengthReverts |
 | High-s signature reverts MalleableSignatureRejected | test_proofCheckIn_malleableHighSReverts |
 | Invalid recovery (v = 0) reverts ECRecoverFailed, never a stale scratch signer (recoverStrict regression; mutation-verified) | test_proofCheckIn_invalidRecoveryDoesNotReturnStaleSigner |

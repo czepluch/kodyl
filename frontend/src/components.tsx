@@ -703,8 +703,7 @@ export function OperatorsPanel({ ev }: { ev: EventView }) {
   // Keyed on the ticking clock like the event page's roster effect:
   // getOperators is cached by the log store version, so an unchanged store
   // returns the same reference and the setState is a no-op render. A mined
-  // addOperator/removeOperator bumps the store on the next block and the
-  // list refreshes.
+  // setOperator bumps the store on the next block and the list refreshes.
   useEffect(() => {
     let live = true
     getOperators(ev.id).then((o) => live && setOperators(o)).catch(() => live && setOperators([]))
@@ -736,7 +735,7 @@ export function OperatorsPanel({ ev }: { ev: EventView }) {
                 <button
                   className="ghost sm"
                   disabled={disabled}
-                  onClick={() => run('Remove operator', () => session.sendTx('removeOperator', [ev.id, o]))}
+                  onClick={() => run('Remove operator', () => session.sendTx('setOperator', [ev.id, o, false]))}
                 >
                   remove
                 </button>
@@ -751,7 +750,7 @@ export function OperatorsPanel({ ev }: { ev: EventView }) {
           disabled={disabled || !isAddress(typed)}
           onClick={() =>
             run('Add operator', async () => {
-              await session.sendTx('addOperator', [ev.id, typed])
+              await session.sendTx('setOperator', [ev.id, typed, true])
               setAddr('')
             })
           }

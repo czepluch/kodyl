@@ -64,6 +64,10 @@ interface KodylAbi {
     ///      path, and the hand-decoded checkInBatch enforces the same check.
     ///      Selector 0x7cc04fa7.
     error DirtyHigherBitsForAddress();
+    /// @dev A bool parameter word above 1. Raised by the std's strict ABI
+    ///      decoding of bool parameters (setOperator's enabled). Selector
+    ///      0x0557dbbf.
+    error DirtyHigherBitsForBool();
     /// @dev std ecrecover rejects s above the curve-order midpoint before
     ///      calling the precompile. Selector 0x25260b20.
     error MalleableSignatureRejected();
@@ -116,11 +120,8 @@ interface KodylAbi {
         bytes[] calldata presenceSigs
     ) external;
     /// @dev Organizer-only. Operators countersign Presence proofs with the
-    ///      same authority as the organizer. An add/remove pair instead of
-    ///      setOperator(eid, operator, bool): the toolchain's std has no
-    ///      calldata decoder for bool parameters.
-    function addOperator(uint256 eid, address operator) external;
-    function removeOperator(uint256 eid, address operator) external;
+    ///      same authority as the organizer.
+    function setOperator(uint256 eid, address operator, bool enabled) external;
     function cancelEvent(uint256 eid) external;
     function setMetadataURI(uint256 eid, string calldata uri) external;
     function claimDust(uint256 eid) external;

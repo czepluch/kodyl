@@ -55,9 +55,10 @@ singleton:
   scratch without pre-zeroing, so an invalid recovery would otherwise return
   a stale word instead of reverting - see the Security review section).
   Door operators are a nested-mapping set, `mapping(uint256, mapping(address,
-  bool))`, gated organizer-only, with an `addOperator`/`removeOperator` pair
-  standing in for `setOperator(eid, operator, bool)` because the toolchain has
-  no `bool` calldata decoder yet.
+  bool))`, gated organizer-only, managed by `setOperator(eid, operator, bool)` -
+  the public `bool` parameter decodes strictly (a word above 1 reverts
+  `DirtyHigherBitsForBool`), courtesy of the std's `bool:ABIDecode` instance
+  landed at the `1fb1f880` re-pin.
 
 ## Layout
 
@@ -76,7 +77,7 @@ Build and test:
 forge test                       # forge is a harness only (see foundry.toml)
 ```
 
-`test/Kodyl.t.sol` (82 scenarios) and `test/KodylInvariant.t.sol` (128k-call
+`test/Kodyl.t.sol` (83 scenarios) and `test/KodylInvariant.t.sol` (128k-call
 ledger fuzz across three concurrent events), plus `test/KodylAccounting.t.sol`
 and `test/KodylConservation.t.sol` (reentrancy + full-lifecycle conservation),
 drive the compiled bytecode through a typed Solidity interface inside forge -

@@ -29,8 +29,8 @@ attendee)`, and anyone submits the pair via
 `Presence` has no expiry of its own; the dispute-window state gate
 (`requireCheckInOpen`) is the only time bound.
 Operators are a nested-mapping set (slot 8), organizer-only, managed by
-`addOperator`/`removeOperator` (a pair, not `setOperator(...,bool)` - no `bool`
-calldata decoder) and read by `isOperator`. Signature recovery goes through
+`setOperator(eid, operator, enabled)` (the `bool` param decodes strictly -
+a word above 1 reverts `DirtyHigherBitsForBool`) and read by `isOperator`. Signature recovery goes through
 `recoverStrict` in `lib.kodyl` (zeroes scratch before `ecrecover`; see its
 comment). The `mailbox/` service is a zero-dependency relay that carries the
 operator's signed `Presence` to a stranded attendee for self-rescue - trust-free,
