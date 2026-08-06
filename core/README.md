@@ -77,7 +77,7 @@ Build and test:
 forge test                       # forge is a harness only (see foundry.toml)
 ```
 
-`test/Kodyl.t.sol` (83 scenarios) and `test/KodylInvariant.t.sol` (128k-call
+`test/Kodyl.t.sol` (84 scenarios) and `test/KodylInvariant.t.sol` (128k-call
 ledger fuzz across three concurrent events), plus `test/KodylAccounting.t.sol`
 and `test/KodylConservation.t.sol` (reentrancy + full-lifecycle conservation)
 and `test/KodylEcon.t.sol` (the adversarial-economics payoff matrix behind
@@ -244,11 +244,11 @@ and can renumber under refactors - the `Counters` refactor did exactly that.
 Check-in authority is custody. The organizer alone can capture every honest
 deposit by registering a sybil and checking in only the sybil: with ten
 honest attendees at 1 ETH each, the sybil claims 11 ETH at Settled - its own
-deposit plus all ten forfeitures. The inverse abuse routes value to the
-maintainer instead: an organizer who checks nobody in turns all deposits
-into dust, claimable immediately at Settled when there are zero check-ins
-and after the 30-day timeout otherwise. Attendees therefore trust the
-organizer with their stake; the mitigations are economic and reputational
+deposit plus all ten forfeitures. The inverse abuse - checking nobody in - is
+defused: a zero-check-in settlement is abandonment, every attendee reclaims
+their deposit in full forever, and no sweep exists (the 30-day timeout sweep
+applies only to checked-in-but-unclaimed payouts). Attendees therefore trust
+the organizer with their stake; the mitigations are economic and reputational
 (an organizer who seizes deposits kills their next event), not
 cryptographic. The maintainer is the second trusted role: it receives dust,
 rotates itself via `setMaintainer`, and is assumed to accept ETH (the

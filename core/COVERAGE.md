@@ -22,7 +22,8 @@ against the compiled Core Solidity bytecode (`test/Kodyl.t.sol` unless noted).
 | Pull-only claims after dispute period | test_claim_paysDepositPlusReward, test_claim_revertsBeforeSettledAndWhenNotCheckedIn, test_claim_andDustRevertDuringDispute (still NotSettled at the inclusive Dispute back edge) |
 | Pro-rata no-show distribution + reward math | test_claim_paysDepositPlusReward (3 reg / 2 checked / 0.5 ETH each) |
 | Dust to maintainer after all claims or timeout | test_claimDust_remainderAfterAllClaims, test_claimDust_gatesAndTimeout, test_claimDust_revertsWhenPotEmpty (exact division leaves a zero pot: DustNotClaimable) |
-| Zero check-ins: everything to dust | test_claimDust_zeroCheckInsAllToDust |
+| Zero check-ins: abandonment - refunds forever, no dust path even past the sweep timeout, refund gate opens only at Settled | test_claimRefund_zeroCheckInAbandonment |
+| A late check-in during Dispute flips an abandoning event into normal settlement (refunds never open) | test_claimRefund_abandonmentClosedByLateCheckIn |
 | Reject unexpected ETH | test_fallback_rejectsPlainTransferAndUnknownSelector, test_fallback_shortCalldataRevertsEmpty, test_nonPayable_rejectsValueWithStdError (value to a non-payable function: exactly the std dispatcher's NonPayableReceivedValue selector, raw bytes pinned) |
 | Mutable metadata URI with event | test_setMetadataURI, test_setMetadataURI_anyState (deliberately state-independent: works in Active, Settled, and on a cancelled event) |
 | Maintainer management | test_setMaintainer, test_claimDust_paysRotatedMaintainer (after rotation, dust and DustClaimed go to the new maintainer only) |
@@ -186,8 +187,8 @@ counters an indexer would see. Every number in `ECONOMICS.md` resolves here.
 | Sybil skim dilutes each honest claimant vs the s=0 counterfactual | test_econ_sybilSkimsForfeitures |
 | Skim share floor(m*d/(c+s)), block total, and dust remainder (fuzzed) | testFuzz_econ_skimShareExact |
 | Excluding an attendee costs the organizer nothing; victim has no recourse | test_econ_exclusionGriefingIsFree |
-| Zero check-ins: whole pot sweeps to the maintainer immediately at Settled | test_econ_abandonmentRoutesPotToMaintainer |
+| Zero check-ins: abandonment refunds everyone in full, nobody profits, no sweep | test_econ_abandonmentRefundsEveryone |
 | The 30-day sweep takes a sleeper's full payout, reward included | test_econ_sweepTakesUnclaimedPayouts |
 | Operator-signed capture reproduces the organizer's payoffs exactly | test_econ_operatorCollusionEqualsOrganizer |
-| Maintainer-as-organizer captures every deposit alone via abandonment | test_econ_maintainerAsOrganizerSelfCapture |
+| Maintainer-as-organizer self-capture is defeated: abandonment refunds, sweep refused | test_econ_maintainerSelfCaptureDefeated |
 | Capacity griefing costs only lockup; freed slots have no self-service exit | test_econ_capacityGriefingCostsOnlyLockup |

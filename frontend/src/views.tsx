@@ -152,7 +152,13 @@ export function MyTickets() {
   const mine = events.filter((e) => e.myStatus !== 0)
   const upcoming = mine.filter((e) => e.state < 3 && !e.cancelled)
   // A swept payout is no longer claimable - it must not read as "Action needed".
-  const toClaim = mine.filter((e) => (e.state === 3 && e.myStatus === 3 && !payoutSwept(e)) || (e.cancelled && e.myStatus === 1))
+  // Refunds count as action: cancelled events and abandoned ones (settled
+  // with zero check-ins) both leave a still-registered attendee owed money.
+  const toClaim = mine.filter(
+    (e) =>
+      (e.state === 3 && e.myStatus === 3 && !payoutSwept(e)) ||
+      ((e.cancelled || (e.state === 3 && e.checkedInCount === 0n)) && e.myStatus === 1),
+  )
   const past = mine.filter((e) => !upcoming.includes(e) && !toClaim.includes(e))
 
   if (!session.connected) return <p className="muted">Connect a wallet or pick a demo account to see your tickets.</p>

@@ -94,21 +94,23 @@ becomes targeted capture (attack 1).
   attested check-in. C4's stake-plus-adjudication would be the counter, and
   is blocked on an adjudication design.
 
-### 4. Abandonment (organizer)
+### 4. Abandonment (organizer) - DEFUSED by C2
 
-Check in nobody. At settlement the vacuous all-claimed rule (0 == 0) makes
-`claimDust` available immediately and the ENTIRE pot - not rounding dust -
-goes to the maintainer: 4 registrations means the maintainer nets 4d while
-every attendee eats -d with no recourse
-(`test_econ_abandonmentRoutesPotToMaintainer`).
+Check in nobody. Before C2 landed, the vacuous all-claimed rule (0 == 0)
+made `claimDust` available immediately at settlement and the ENTIRE pot went
+to the maintainer. Now a zero-check-in settlement is abandonment: `claimDust`
+refuses it outright (even past the 30-day timeout - otherwise the maintainer
+could race the refunds), `claimRefund` opens to every registered attendee and
+never expires, and every actor nets exactly zero
+(`test_econ_abandonmentRefundsEveryone`). The refund gate opens only at
+Settled; a single late check-in during Dispute flips the event into normal
+settlement (`test_claimRefund_abandonmentClosedByLateCheckIn`,
+`test_claimRefund_zeroCheckInAbandonment` in the main suite).
 
-- **Cost**: zero - abandonment is doing nothing.
-- **Footprint**: `checkedInCount == 0` with a nonzero `registeredCount`, then
-  an immediate dust sweep. Unambiguous and highly visible.
-- **Today**: not prevented. Note the organizer gains nothing directly; the
-  pot goes to the maintainer - which is exactly what makes attack 6 work.
-- **Changed by**: C2 (zero check-ins reclassified as abandonment: refunds
-  open, no sweep - the attack becomes profitless for everyone).
+- **Cost**: zero, and so is the take: abandonment now achieves nothing.
+- **Footprint**: `checkedInCount == 0` with a nonzero `registeredCount`.
+- **Residual**: a fake event that wants profit must check in a sybil, which
+  is attack 1 - louder on-chain and bounded by C1 once that lands.
 
 ### 5. Operator collusion
 
@@ -125,19 +127,16 @@ operator IS sharing the custody surface - the payoffs are identical.
 - **Changed by**: C1, C3 (an operator's cross-event appointment history is a
   usable signal).
 
-### 6. Maintainer-as-organizer self-capture
+### 6. Maintainer-as-organizer self-capture - DEFUSED by C2
 
-The maintainer address creates an event and abandons it (attack 4): one party
-captures every deposit, 3d for 3 trusting registrants, no sybil needed
-(`test_econ_maintainerAsOrganizerSelfCapture`). Nothing prevents the
-maintainer from organizing events; the roles compose.
+The maintainer address creates an event and abandons it (attack 4). Before
+C2 this was one-party capture of every deposit with no sybil needed; now the
+sweep is refused, the pot refunds in full, and the self-capture nets exactly
+nothing (`test_econ_maintainerSelfCaptureDefeated`). The rational scammer's
+remaining move is a checked-in sybil - attack 1's economics and footprint.
 
-- **Cost**: zero.
-- **Footprint**: the dust recipient equals the organizer - a one-line
-  indexer check.
-- **Today**: not prevented.
-- **Changed by**: C2 closes this completely (abandonment stops routing funds
-  anywhere).
+- **Cost**: zero, take: zero.
+- **Residual**: as attack 4.
 
 ### 7. The 30-day sweep takes unclaimed payouts
 
@@ -182,9 +181,9 @@ cannot cancel (`test_econ_capacityGriefingCostsOnlyLockup`).
 | 1 | Sybil capture | `nHonest * d` | gas | loud (1-of-n check-in ratio) | not prevented |
 | 2 | Sybil skim | `s * floor(m*d/(c+s))` | gas | quiet (plausible ratios) | not prevented |
 | 3 | Exclusion griefing | 0 (harm without profit) | zero | invisible | no recourse |
-| 4 | Abandonment | 0 for organizer, pot to maintainer | zero | unambiguous | not prevented |
+| 4 | Abandonment | 0 - full refunds | zero | unambiguous | defused (C2) |
 | 5 | Operator collusion | as attack 1 | gas | as 1 + OperatorSet log | not prevented |
-| 6 | Maintainer self-capture | `n * d` | zero | dust recipient == organizer | not prevented |
+| 6 | Maintainer self-capture | 0 - full refunds | zero | checkedInCount 0 | defused (C2) |
 | 7 | Sweep of unclaimed payouts | n/a (protocol rule) | n/a | DustClaimed after timeout | documented |
 | 8 | Capacity griefing | 0 (denial only) | lockup + gas | mass register/cancel | tolerated |
 
@@ -213,8 +212,12 @@ the economics above are dominated entirely by the deposit flows.
 
 ## What follows
 
-The candidate mechanism changes - reward cap (C1), zero-check-in refunds
-(C2), reputation surface (C3), organizer stake (C4, deprioritized until an
-adjudication design exists) - are specified in `ECONOMICS-PLAN.md` Track 2,
-each to be judged against this matrix. When one lands, its new payoffs get
-their own `test_econ_*` rows and this document is updated in the same commit.
+The candidate mechanism changes are specified in `ECONOMICS-PLAN.md` Track 2
+and land one commit at a time, each with its new `test_econ_*` payoff rows
+and an update to this document:
+
+- **C2 zero-check-in refunds: LANDED** (attacks 4 and 6 defused above).
+- **C1 reward cap** (k = 1 protocol constant, excess rebated to no-shows):
+  accepted, next up - bounds attacks 1 and 5 to one deposit per event.
+- **C3 reputation surface** (frontend): accepted.
+- **C4 organizer stake**: deprioritized until an adjudication design exists.

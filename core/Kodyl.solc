@@ -383,28 +383,36 @@ contract Kodyl {
         }
     }
 
-    // Refund path once the organizer has cancelled: always available to
-    // registered attendees, regardless of the cancellation deadline.
+    // Refund path without organizer cooperation. Open in two regimes with the
+    // same shape: the organizer cancelled (always, regardless of the
+    // cancellation deadline), or a non-cancelled event settled with ZERO
+    // check-ins - abandonment, indistinguishable on-chain from a fake event
+    // or a no-show door, so the fail-safe outcome is everyone's deposit back.
+    // Both pots are exactly the sum of attributed deposits: refunds never
+    // expire and there is no dust to sweep (claimDust refuses chk == 0).
     public function claimRefund(eid : uint256) -> () {
         match eventsRec[eid] {
         | EventRec.NoEvent => revertNotFound();
         | EventRec.Ev(org, dep, deadline, start, end_, dispute, cap) =>
-            requireK(cancelledM[eid], "EventNotCancelled()");
-            requireStatus(statusM[eid][caller()], 1);
-
-            statusM[eid][caller()] = AttendeeStatus.Cancelled;
             match countersM[eid] {
             | Counters(reg, chk, clm, hld) =>
+                let wasCancelled = cancelledM[eid];
+                let abandoned =
+                    stateOrd(deriveState(wasCancelled, start, end_, dispute)) == 3 && chk == 0;
+                requireK(wasCancelled || abandoned, "EventNotCancelled()");
+                requireStatus(statusM[eid][caller()], 1);
+
+                statusM[eid][caller()] = AttendeeStatus.Cancelled;
                 countersM[eid] = Counters(reg - 1, chk, clm, subCk(hld, dep));
+                totalHeld = subCk(totalHeld, dep);
+
+                sendValue(caller(), dep);
+
+                solAssert(balanceSelf() >= totalHeld);
+
+                emitLog3W1(keccakLit("RefundClaimed(uint256,address,uint256)"),
+                           Typedef.rep(eid), Typedef.rep(caller()), Typedef.rep(dep));
             }
-            totalHeld = subCk(totalHeld, dep);
-
-            sendValue(caller(), dep);
-
-            solAssert(balanceSelf() >= totalHeld);
-
-            emitLog3W1(keccakLit("RefundClaimed(uint256,address,uint256)"),
-                       Typedef.rep(eid), Typedef.rep(caller()), Typedef.rep(dep));
         }
     }
 
@@ -618,6 +626,12 @@ contract Kodyl {
                      "NotSettled()");
             match countersM[eid] {
             | Counters(reg, chk, clm, hld) =>
+                // A zero-check-in settlement is abandonment, not dust: the pot
+                // is exactly the attributed deposits and belongs to claimRefund
+                // (which never expires), so there is no sweep - mirroring
+                // cancelled events. Without this gate the vacuous 0 == 0
+                // "all claimed" would let the maintainer race the refunds.
+                requireK(chk != 0, "DustNotClaimable()");
                 let allClaimed = clm == chk;
                 let timeoutPassed = timeNow() > addCk(addCk(end_, dispute), dustClaimTimeout());
                 if (!allClaimed && !timeoutPassed) {

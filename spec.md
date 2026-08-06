@@ -29,7 +29,7 @@ This is a reimplementation/evolution of [Kickback](https://kickback.events/), de
 
 - Attendees who neither cancel nor check in forfeit their deposit
 - Forfeited deposits are distributed pro-rata among checked-in attendees
-- If nobody checks in, the entire pot becomes dust (claimable for the project maintainer) as soon as the event settles
+- If nobody checks in, the event settles as **abandoned**: every registered attendee can reclaim their deposit in full (`claimRefund`, forever - see Settlement)
 
 ### Event Cancellation
 
@@ -80,7 +80,7 @@ The direction is `>=`, not `==`: forced ETH (selfdestruct, block-reward payments
 - Registers with the exact deposit
 - Can cancel through the deadline (immediate refund)
 - Can re-register after cancelling
-- Claims deposit + reward after the dispute period ends, or a refund if the event was cancelled
+- Claims deposit + reward after the dispute period ends, or a refund if the event was cancelled or settled abandoned (zero check-ins)
 
 **Maintainer** (one address, protocol-level)
 - Receives per-event dust and timed-out unclaimed payouts
@@ -118,7 +118,7 @@ Boundary semantics are exact and tested at every edge:
 | `Registration` | `now < eventStart` | Register, cancel (through the deadline), organizer cancel event, set metadata URI |
 | `Active` | `eventStart <= now <= eventEnd` | Check-ins (single/batch), set metadata URI |
 | `Dispute` | `eventEnd < now <= eventEnd + disputePeriod` | Late check-ins by organizer, set metadata URI |
-| `Settled` | `now > eventEnd + disputePeriod` | Claims (until swept - late claims revert `PayoutSwept`), dust withdrawal, set metadata URI |
+| `Settled` | `now > eventEnd + disputePeriod` | Claims (until swept - late claims revert `PayoutSwept`), dust withdrawal, set metadata URI; with zero check-ins: refund claims instead (forever, no dust) |
 | `Cancelled` | `cancelled == true` | Refund claims (forever), attendee cancel (through the deadline), set metadata URI |
 
 Notes on the two rows that are easy to get wrong:
@@ -169,7 +169,7 @@ enum AttendeeStatus {
 
 **Valid transitions:**
 - `None → Registered` (register, Registration state only)
-- `Registered → Cancelled` (cancel through the deadline, or claimRefund on a cancelled event)
+- `Registered → Cancelled` (cancel through the deadline, or claimRefund on a cancelled or abandoned event)
 - `Registered → CheckedIn` (organizer check-in, Active or Dispute)
 - `Cancelled → Registered` (re-register with a new deposit; only while the state is Registration, so impossible once the event has started or been cancelled)
 - `CheckedIn → Claimed` (claim at Settled, if the pot has not been swept)
@@ -356,11 +356,16 @@ Due to floor division, some wei may remain after all claims. Example:
 - Each gets 3 wei reward (10 / 3 = 3)
 - 1 wei dust remains (10 % 3 = 1)
 
-`claimDust(eid)` can be called by anyone once the event is settled and either every checked-in attendee has claimed or a 30-day timeout has passed. Dust is **the event's own pot** - exact per-event accounting, never a reading of the shared contract balance - and goes to the project maintainer.
+`claimDust(eid)` can be called by anyone once the event is settled **with at
+least one check-in** and either every checked-in attendee has claimed or a
+30-day timeout has passed. Dust is **the event's own pot** - exact per-event
+accounting, never a reading of the shared contract balance - and goes to the
+project maintainer.
 
 ```solidity
 function claimDust(uint256 eid) external {
     require(getState(eid) == State.Settled, NotSettled());
+    require(checkedInCount[eid] != 0, DustNotClaimable()); // abandoned pots refund, never sweep
     require(claimedCount[eid] == checkedInCount[eid]
          || block.timestamp > eventEnd + disputePeriod + 30 days, DustNotClaimable());
 
@@ -374,16 +379,31 @@ function claimDust(uint256 eid) external {
 
 **The timeout sweep takes unclaimed payouts too.** After the 30-day timeout the whole remaining pot - rounding dust *and* the payouts of checked-in attendees who never claimed - goes to the maintainer. A checked-in attendee who shows up later is told plainly: `claim` reverts `PayoutSwept()` (rather than underflowing into an opaque panic). Claim within 30 days of settlement or forfeit to the maintainer - that is the protocol's abandonment rule.
 
-### Zero Check-ins Edge Case
+### Zero Check-ins: Abandonment
 
-If nobody checks in (`checkedInCount == 0`):
-- `rewardPerAttendee` is defined as 0 (no division by zero)
-- There are no claimants, so the entire pot is dust
-- `claimDust` is available **immediately at Settled**: "all claimed" is vacuously true (0 == 0)
+An event that settles with `checkedInCount == 0` is **abandoned**. On-chain
+this is indistinguishable from a fake event, a door that never happened, or a
+venue disaster - so the fail-safe outcome is chosen: every still-registered
+attendee can `claimRefund` their full deposit, forever, exactly as on a
+cancelled event. Nobody profits from an abandoned event: not the organizer
+(no payout path), and deliberately not the maintainer either.
 
-### Cancelled Events: No Sweep
+Mechanically: `rewardPerAttendee` is defined as 0 (no division by zero), the
+refund gate opens only at `Settled` (during `Active`/`Dispute` the organizer
+may still check people in - a single late check-in flips the event into
+normal settlement and the refund path never opens), and `claimDust` refuses
+zero-check-in events outright. Without that refusal, "all claimed" would be
+vacuously true (0 == 0) and the maintainer could race the refunds.
 
-Cancelled events have **no dust path and no timeout**: `claimDust` requires the `Settled` state, which a cancelled event never reaches, and `claimRefund` works forever. This is deliberate. A cancelled pot is exactly the sum of attributed deposits - there is no rounding dust and no forfeiture to abandon - so a sweep would convert funds that are today fail-safe (locked at worst, stealable by no one) into a maintainer seizure surface. Refunds never expire.
+### No Sweep for Cancelled or Abandoned Events
+
+Cancelled and abandoned events have **no dust path and no timeout**: for a
+cancelled event `claimDust` requires the `Settled` state it never reaches;
+for an abandoned one it refuses `checkedInCount == 0`. In both, `claimRefund`
+works forever. This is deliberate. Both pots are exactly the sum of
+attributed deposits - there is no rounding dust and no forfeiture to abandon -
+so a sweep would convert funds that are today fail-safe (locked at worst,
+stealable by no one) into a maintainer seizure surface. Refunds never expire.
 
 ## Invariants
 
@@ -427,7 +447,7 @@ No reentrancy guard: status transitions are terminal and flip before any send (C
 **Check-in authority is custody.** The organizer decides who checked in, and check-in status is what money follows - so attendees trust the organizer with their stake, not merely with attendance bookkeeping:
 
 - **An organizer can capture honest deposits.** Register a sybil, check in only the sybil: with 10 honest attendees at 1 ETH each, the sybil claims 11 ETH at settlement (its own deposit plus all 10 forfeitures). No protocol rule prevents this.
-- **An organizer who checks in nobody routes every deposit to the maintainer** - the whole pot is dust immediately at Settled with zero check-ins, or after the 30-day sweep otherwise.
+- **An organizer who checks in nobody achieves nothing** - a zero-check-in settlement is abandonment: every attendee reclaims their deposit in full and no sweep exists. (Checked-in-but-unclaimed payouts still sweep to the maintainer after 30 days - that rule is about claimant abandonment, not organizer abuse.)
 - Mitigations are economic and reputational only: an organizer who does this burns their ability to run future events. A future organizer-stake mechanism could add a slashing cost.
 
 What the organizer *cannot* do: change any event parameter after creation, take custody directly (no payout path pays the organizer as such), cancel after the event starts, block a pre-deadline cancel, or block refunds on a cancelled event.
@@ -444,7 +464,7 @@ What the organizer *cannot* do: change any event parameter after creation, take 
 | Operator sybil check-in (an authorized operator attests presence for a sock puppet) | **Not prevented** - same surface as the organizer; appointing an operator grants the organizer's check-in power. On-chain, auditable (`isOperator`), revocable (`setOperator`) |
 | Ticket sharing (an attendee forwards their signed `Ticket` to a friend) | **Tolerated by design** - no anti-share binding. The human at the door gates check-in: an operator signs `Presence` only after seeing a body |
 | Forged / replayed proof (wrong signer, wrong event, wrong chain) | Rejected on-chain: `TicketSignerMismatch`, `PresenceSignerUnauthorized`, or domain-mismatch (recovers a different signer). Malformed signatures revert (`MalleableSignatureRejected` / `ECRecoverFailed` / `InvalidSignatureLength`); after the dispute window every check-in reverts `CheckInWindowClosed` |
-| Organizer checks in nobody | **Not prevented** - all deposits become maintainer dust (immediately at Settled, or via the 30-day sweep). Same trust surface |
+| Organizer checks in nobody | **Defused** - zero-check-in settlement is abandonment: full refunds forever, no sweep, nobody profits |
 | Front-running check-ins | Not profitable - check-in doesn't transfer value |
 | Reentrancy on claim/refund/dust | CEI + terminal status transitions; attacked directly in the accounting suite |
 | Griefing via spam registrations | The deposit itself is the spam cost |
@@ -475,6 +495,7 @@ verified against the bytecode by `test/KodylEcon.t.sol`.
 - [x] Event cancellation with full refunds (before start only; refunds never expire)
 - [x] Pull-only claims (no `settleAll()`)
 - [x] Per-event dust to the project maintainer; 30-day timeout sweep with `PayoutSwept` for late claims
+- [x] Zero-check-in settlement is abandonment: full refunds forever, no sweep (the fail-safe for fake events, no-show doors, and force majeure)
 - [x] Rotatable maintainer (`setMaintainer`)
 - [x] Metadata URI mutable in every state (emits event on change)
 - [x] Plain ETH sends rejected via the fallback; forced ETH absorbed by the ledger

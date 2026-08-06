@@ -250,11 +250,11 @@ contract KodylEconTest is Test {
     }
 
     // ==================================================================
-    // 5. Abandonment: check in nobody and the whole pot is maintainer dust
-    // the instant the event settles (vacuous "all claimed" with 0 check-ins).
+    // 5. Abandonment: check in nobody and the event settles as abandoned -
+    // refunds open for everyone, nobody profits, nothing sweeps (C2).
     // ==================================================================
 
-    function test_econ_abandonmentRoutesPotToMaintainer() public {
+    function test_econ_abandonmentRefundsEveryone() public {
         uint256 eid = _create(DEPOSIT);
         address[] memory att = _actors("abandoned", 4);
         for (uint256 i = 0; i < 4; ++i) _reg(eid, att[i], DEPOSIT);
@@ -262,15 +262,22 @@ contract KodylEconTest is Test {
         // The organizer does nothing at all.
         _settle();
         assertEq(k.checkedInCount(eid), 0);
-        k.claimDust(eid); // available immediately: 0 == 0 claimants
-        assertEq(maintainer.balance, 4 * DEPOSIT, "entire pot becomes maintainer dust");
+
+        // No sweep, ever: the pot belongs to refunds.
+        vm.expectRevert(KodylAbi.DustNotClaimable.selector);
+        k.claimDust(eid);
+        vm.warp(eventEnd + disputePeriod + 30 days + 1);
+        vm.expectRevert(KodylAbi.DustNotClaimable.selector);
+        k.claimDust(eid);
+
         for (uint256 i = 0; i < 4; ++i) {
-            assertEq(att[i].balance, 0, "every attendee loses the deposit");
             vm.prank(att[i]);
-            vm.expectRevert(abi.encodeWithSelector(KodylAbi.InvalidAttendeeStatus.selector, 1, 3));
-            k.claim(eid);
+            k.claimRefund(eid);
+            assertEq(att[i].balance, DEPOSIT, "abandonment costs the attendee nothing");
         }
+        assertEq(maintainer.balance, 0, "the maintainer no longer profits from failed events");
         assertEq(organizer.balance, 0);
+        assertEq(address(k).balance, 0, "pot fully refunded");
     }
 
     // ==================================================================
@@ -348,22 +355,31 @@ contract KodylEconTest is Test {
     }
 
     // ==================================================================
-    // 8. Maintainer-as-organizer: one party, full capture, no sybil needed.
-    // The maintainer role is permissionless to combine with organizing.
+    // 8. Maintainer-as-organizer self-capture is DEAD (C2): abandoning an
+    // own event routes nothing anywhere - the pot refunds.
     // ==================================================================
 
-    function test_econ_maintainerAsOrganizerSelfCapture() public {
+    function test_econ_maintainerSelfCaptureDefeated() public {
         uint256 eid = _createAs(maintainer, DEPOSIT, 0);
         address[] memory att = _actors("trusting", 3);
         for (uint256 i = 0; i < 3; ++i) _reg(eid, att[i], DEPOSIT);
 
-        // Abandon: check in nobody, then sweep as maintainer.
+        // Abandon: check in nobody, then try to sweep as maintainer.
         _settle();
+        vm.expectRevert(KodylAbi.DustNotClaimable.selector);
         k.claimDust(eid);
-        assertEq(maintainer.balance, 3 * DEPOSIT, "one party captures every deposit");
+        vm.warp(eventEnd + disputePeriod + 30 days + 1);
+        vm.expectRevert(KodylAbi.DustNotClaimable.selector);
+        k.claimDust(eid);
+
         for (uint256 i = 0; i < 3; ++i) {
-            assertEq(att[i].balance, 0);
+            vm.prank(att[i]);
+            k.claimRefund(eid);
+            assertEq(att[i].balance, DEPOSIT);
         }
+        assertEq(maintainer.balance, 0, "self-capture nets exactly nothing");
+        // The rational scammer's remaining move is a sybil (attack 1), which
+        // costs a check-in transaction and leaves the loud 1-of-n footprint.
     }
 
     // ==================================================================

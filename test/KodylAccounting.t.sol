@@ -205,6 +205,28 @@ contract KodylAccountingTest is Test {
 
         uint256 totalDeposited = dep * nRegistered;
         uint256 paidOut;
+
+        if (nCheckedIn == 0) {
+            // Zero check-ins is abandonment: no dust path ever (even past the
+            // sweep timeout), the pot refunds in full and never expires.
+            vm.expectRevert(IKodyl.DustNotClaimable.selector);
+            k.claimDust(eid);
+            vm.warp(eventEnd + disputePeriod + 30 days + 1);
+            vm.expectRevert(IKodyl.DustNotClaimable.selector);
+            k.claimDust(eid);
+            for (uint256 i = 0; i < nRegistered; ++i) {
+                uint256 before = who[i].balance;
+                vm.prank(who[i]);
+                k.claimRefund(eid);
+                paidOut += who[i].balance - before;
+                assertEq(who[i].balance, dep, "full refund");
+            }
+            assertEq(paidOut, totalDeposited, "abandonment refunds conserve");
+            assertEq(k.held(eid), 0);
+            assertEq(maintainer.balance, 0, "maintainer gets nothing from abandonment");
+            return;
+        }
+
         for (uint256 i = 0; i < nCheckedIn; ++i) {
             uint256 before = who[i].balance;
             vm.prank(who[i]);
@@ -221,17 +243,13 @@ contract KodylAccountingTest is Test {
 
         // The core property: every wei deposited left as either a payout or dust.
         assertEq(paidOut + dust, totalDeposited, "ETH not conserved for event");
-        assertEq(k.held(eid), dust > 0 ? 0 : 0);
+        assertEq(k.held(eid), 0);
 
         // No claimant received more than deposit + floor(fair reward).
-        if (nCheckedIn > 0) {
-            uint256 noShow = nRegistered - nCheckedIn;
-            uint256 fairReward = (noShow * dep) / nCheckedIn;
-            assertEq(paidOut, nCheckedIn * (dep + fairReward), "reward math drift");
-            assertEq(dust, (noShow * dep) % nCheckedIn, "dust != remainder");
-        } else {
-            assertEq(dust, totalDeposited, "zero-checkin: all should be dust");
-        }
+        uint256 noShow = nRegistered - nCheckedIn;
+        uint256 fairReward = (noShow * dep) / nCheckedIn;
+        assertEq(paidOut, nCheckedIn * (dep + fairReward), "reward math drift");
+        assertEq(dust, (noShow * dep) % nCheckedIn, "dust != remainder");
     }
 
     function test_conservation_indivisible7wei() public {

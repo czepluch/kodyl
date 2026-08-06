@@ -870,15 +870,69 @@ contract KodylTest is Test {
         assertEq(k.totalHeld(), 0);
     }
 
-    function test_claimDust_zeroCheckInsAllToDust() public {
+    function test_claimRefund_zeroCheckInAbandonment() public {
         uint256 eid = _create();
         _register(eid, alice);
         _register(eid, bob);
+
+        // While check-in is still possible (Active/Dispute) the refund path
+        // stays closed: the organizer may yet check people in.
+        _toActive();
+        vm.prank(alice);
+        vm.expectRevert(KodylAbi.EventNotCancelled.selector);
+        k.claimRefund(eid);
+        vm.warp(eventEnd + 1); // Dispute
+        vm.prank(alice);
+        vm.expectRevert(KodylAbi.EventNotCancelled.selector);
+        k.claimRefund(eid);
+
+        // Settled with zero check-ins: abandonment. No dust path, not even
+        // after the sweep timeout - the pot belongs to refunds.
         _toSettled();
-        uint256 mBefore = maintainer.balance;
+        vm.expectRevert(KodylAbi.DustNotClaimable.selector);
         k.claimDust(eid);
-        assertEq(maintainer.balance, mBefore + 2 * DEPOSIT);
+        vm.warp(eventEnd + disputePeriod + 30 days + 1);
+        vm.expectRevert(KodylAbi.DustNotClaimable.selector);
+        k.claimDust(eid);
+
+        // Refunds are full, never expire, and drain the pot exactly.
+        vm.prank(alice);
+        k.claimRefund(eid);
+        assertEq(alice.balance, DEPOSIT);
+        vm.warp(eventEnd + disputePeriod + 365 days);
+        vm.prank(bob);
+        vm.expectEmit(true, true, false, true);
+        emit RefundClaimed(eid, bob, DEPOSIT);
+        k.claimRefund(eid);
+        assertEq(bob.balance, DEPOSIT);
+        assertEq(k.registeredCount(eid), 0);
+        assertEq(k.held(eid), 0);
         assertEq(k.totalHeld(), 0);
+
+        // Double refund is the usual terminal-status revert.
+        vm.prank(alice);
+        vm.expectRevert(abi.encodeWithSelector(KodylAbi.InvalidAttendeeStatus.selector, 2, 1));
+        k.claimRefund(eid);
+    }
+
+    function test_claimRefund_abandonmentClosedByLateCheckIn() public {
+        uint256 eid = _create();
+        _register(eid, alice);
+        _register(eid, bob);
+
+        // A single late check-in during Dispute flips the event into normal
+        // settlement: refunds never open, the claim path rules.
+        vm.warp(eventEnd + 1);
+        vm.prank(organizer);
+        k.checkIn(eid, alice);
+
+        _toSettled();
+        vm.prank(bob);
+        vm.expectRevert(KodylAbi.EventNotCancelled.selector);
+        k.claimRefund(eid);
+        vm.prank(alice);
+        k.claim(eid);
+        assertEq(alice.balance, 2 * DEPOSIT); // bob's forfeiture is alice's reward
     }
 
     function test_claimDust_gatesAndTimeout() public {
@@ -936,8 +990,11 @@ contract KodylTest is Test {
 
     function test_claimDust_paysRotatedMaintainer() public {
         uint256 eid = _create();
-        _register(eid, alice); // alice no-shows: the whole pot is dust
-        _toSettled();
+        _register(eid, alice);
+        _toActive();
+        vm.prank(organizer);
+        k.checkIn(eid, alice); // checked in but never claims: sweepable
+        vm.warp(eventEnd + disputePeriod + 30 days + 1);
 
         address next = makeAddr("nextMaintainer");
         vm.prank(maintainer);
@@ -959,7 +1016,13 @@ contract KodylTest is Test {
         uint256 b = _createAs(carol, 0);
         _register(a, alice);
         _register(b, bob);
-        _toSettled(); // nobody checked in anywhere
+        _toActive();
+        vm.prank(organizer);
+        k.checkIn(a, alice);
+        vm.prank(carol);
+        k.checkIn(b, bob);
+        // Neither claims; both pots become sweepable after the timeout.
+        vm.warp(eventEnd + disputePeriod + 30 days + 1);
 
         k.claimDust(a);
         // Event b's pot is untouched.

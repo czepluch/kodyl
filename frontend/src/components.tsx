@@ -162,7 +162,9 @@ export function EventActions({ ev, roster }: { ev: EventView; roster?: RosterEnt
           Cancel &amp; refund
         </button>
       )}
-      {ev.cancelled && ev.myStatus === 1 && (
+      {(ev.cancelled || (ev.state === 3 && ev.checkedInCount === 0n)) && ev.myStatus === 1 && (
+        // Cancelled events and abandoned ones (settled with zero check-ins)
+        // share the refund path; both never expire.
         <button disabled={disabled} onClick={() => run('Claim refund', () => session.sendTx('claimRefund', [ev.id]))}>
           Claim refund
         </button>
