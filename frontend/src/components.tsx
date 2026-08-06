@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { type Hex, isAddress, recoverTypedDataAddress } from 'viem'
-import { ACCOUNTS, CONTRACT, STATE_LABELS, STATUS_LABELS, chain, isLocalChain } from './config'
+import { ACCOUNTS, CONTRACT, STATE, STATE_LABELS, STATUS, STATUS_LABELS, chain, isLocalChain } from './config'
 import { useApp } from './ctx'
 import { type EventView } from './useKodyl'
 import { type RosterEntry, getOperators } from './logs'
@@ -23,7 +23,7 @@ export function StateBadge({ state, cancelled }: { state: number; cancelled: boo
 }
 
 export function nextPhaseTs(ev: EventView): bigint {
-  return ev.state === 0 ? ev.eventStart : ev.state === 1 ? ev.eventEnd + 1n : ev.eventEnd + ev.disputePeriod + 1n
+  return ev.state === STATE.Registration ? ev.eventStart : ev.state === STATE.Active ? ev.eventEnd + 1n : ev.eventEnd + ev.disputePeriod + 1n
 }
 
 export function isOrganizer(ev: EventView, me: string): boolean {
@@ -35,7 +35,7 @@ export function isOrganizer(ev: EventView, me: string): boolean {
 // enough for every remaining payout, so deposit + reward exceeding held means
 // claimDust took the pot after the timeout.
 export function payoutSwept(ev: EventView): boolean {
-  return ev.state === 3 && ev.myStatus === 3 && ev.deposit + ev.reward > ev.held
+  return ev.state === STATE.Settled && ev.myStatus === STATUS.CheckedIn && ev.deposit + ev.reward > ev.held
 }
 
 // --- navigation ---
@@ -142,7 +142,7 @@ export function EventActions({ ev, roster }: { ev: EventView; roster?: RosterEnt
   // organizer-only on-chain and would revert NotOrganizer.
   const amOperator = useAmOperator(ev.id, me, organizer)
   const full = ev.maxAttendees > 0n && ev.registeredCount >= ev.maxAttendees
-  const canCancel = ev.state === 0 && ev.myStatus === 1 && !ev.cancelled && now <= Number(ev.cancellationDeadline)
+  const canCancel = ev.state === STATE.Registration && ev.myStatus === STATUS.Registered && !ev.cancelled && now <= Number(ev.cancellationDeadline)
   const disabled = busy || !session.connected
   const swept = payoutSwept(ev)
   // claimDust's own precondition, mirrored so the button is enabled exactly
@@ -152,7 +152,7 @@ export function EventActions({ ev, roster }: { ev: EventView; roster?: RosterEnt
 
   return (
     <div className="actions">
-      {ev.state === 0 && ev.myStatus !== 1 && !full && (
+      {ev.state === STATE.Registration && ev.myStatus !== STATUS.Registered && !full && (
         <button disabled={disabled} onClick={() => run('Register', () => session.sendTx('register', [ev.id], ev.deposit))}>
           Register ({fmtEth(ev.deposit)})
         </button>
@@ -162,15 +162,15 @@ export function EventActions({ ev, roster }: { ev: EventView; roster?: RosterEnt
           Cancel &amp; refund
         </button>
       )}
-      {(ev.cancelled || (ev.state === 3 && ev.checkedInCount === 0n)) && ev.myStatus === 1 && (
+      {(ev.cancelled || (ev.state === STATE.Settled && ev.checkedInCount === 0n)) && ev.myStatus === STATUS.Registered && (
         // Cancelled events and abandoned ones (settled with zero check-ins)
         // share the refund path; both never expire.
         <button disabled={disabled} onClick={() => run('Claim refund', () => session.sendTx('claimRefund', [ev.id]))}>
           Claim refund
         </button>
       )}
-      {ev.myStatus === 1 && !ev.cancelled && ev.state < 3 && <TicketButton ev={ev} />}
-      {ev.state === 3 && ev.myStatus === 3 && !swept && (
+      {ev.myStatus === STATUS.Registered && !ev.cancelled && ev.state < STATE.Settled && <TicketButton ev={ev} />}
+      {ev.state === STATE.Settled && ev.myStatus === STATUS.CheckedIn && !swept && (
         <button disabled={disabled} onClick={() => run('Claim payout', () => session.sendTx('claim', [ev.id]))}>
           Claim payout
         </button>
@@ -178,7 +178,7 @@ export function EventActions({ ev, roster }: { ev: EventView; roster?: RosterEnt
       {swept && <span className="muted">Payout was swept to the maintainer after the 30-day timeout.</span>}
 
       {(organizer || amOperator) &&
-        (ev.state === 1 || ev.state === 2) &&
+        (ev.state === STATE.Active || ev.state === STATE.Dispute) &&
         (roster === undefined ? (
           // Cards have no roster data - check-in lives on the event page.
           <a className="ghost-link" href={to(`/event/${ev.id}`)}>Check in attendees on the event page &rarr;</a>
@@ -187,12 +187,12 @@ export function EventActions({ ev, roster }: { ev: EventView; roster?: RosterEnt
         ) : (
           <CheckIn ev={ev} roster={roster} organizer={organizer} />
         ))}
-      {organizer && ev.state === 0 && !ev.cancelled && (
+      {organizer && ev.state === STATE.Registration && !ev.cancelled && (
         <button className="ghost" disabled={disabled} onClick={() => run('Cancel event', () => session.sendTx('cancelEvent', [ev.id]))}>
           Cancel event
         </button>
       )}
-      {ev.state === 3 && ev.held > 0n && (
+      {ev.state === STATE.Settled && ev.held > 0n && (
         <>
           <button
             className="ghost"
@@ -639,7 +639,7 @@ function useMailboxVoucher(eid: bigint, me: string, active: boolean): { voucher:
 export function CheckInBanner({ ev, showEvent = false }: { ev: EventView; showEvent?: boolean }) {
   const { session, busy, run } = useApp()
   const me = session.address
-  const atRisk = session.connected && ev.myStatus === 1 && !ev.cancelled && (ev.state === 1 || ev.state === 2)
+  const atRisk = session.connected && ev.myStatus === STATUS.Registered && !ev.cancelled && (ev.state === STATE.Active || ev.state === STATE.Dispute)
   const { voucher, polled } = useMailboxVoucher(ev.id, me, atRisk)
 
   // Wait for the first poll so the never-scanned guidance cannot flash before
@@ -678,7 +678,7 @@ export function CheckInBanner({ ev, showEvent = false }: { ev: EventView; showEv
     )
   }
 
-  if (ev.state !== 2) return null
+  if (ev.state !== STATE.Dispute) return null
   return (
     <div className="banner" role="alert">
       {title}
@@ -770,7 +770,7 @@ export function EventCard({ ev }: { ev: EventView }) {
   const { session, now } = useApp()
   const meta = useMetadata(ev.metadataURI)
   const organizer = isOrganizer(ev, session.address)
-  const untilNext = ev.state < 3 && !ev.cancelled ? Number(nextPhaseTs(ev)) - now : 0
+  const untilNext = ev.state < STATE.Settled && !ev.cancelled ? Number(nextPhaseTs(ev)) - now : 0
 
   return (
     <div className="card">
@@ -779,7 +779,7 @@ export function EventCard({ ev }: { ev: EventView }) {
         <StateBadge state={ev.state} cancelled={ev.cancelled} />
       </div>
       {meta?.location && <p className="loc">{meta.location}</p>}
-      {ev.state < 3 && !ev.cancelled && (
+      {ev.state < STATE.Settled && !ev.cancelled && (
         <p className="countdown">&rarr; {STATE_LABELS[ev.state + 1] ?? 'Settled'} in {fmtDuration(untilNext)}</p>
       )}
       <div className="grid">
@@ -835,7 +835,7 @@ export function DemoDrawer() {
 // jump-to-next-phase helper (used on the event page)
 export function JumpButton({ ev }: { ev: EventView }) {
   const { busy, run } = useApp()
-  if (!isLocalChain || ev.state >= 3 || ev.cancelled) return null
+  if (!isLocalChain || ev.state >= STATE.Settled || ev.cancelled) return null
   return (
     <button className="ghost sm" disabled={busy} onClick={() => run('Advance to next phase', () => warpTo(nextPhaseTs(ev)))}>
       Jump to {STATE_LABELS[ev.state + 1] ?? 'Settled'} &raquo;

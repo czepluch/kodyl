@@ -1,6 +1,6 @@
 import { type FormEvent, useEffect, useMemo, useState } from 'react'
 import { parseEther } from 'viem'
-import { STATE_LABELS, STATUS_LABELS } from './config'
+import { STATE, STATE_LABELS, STATUS, STATUS_LABELS } from './config'
 import { useApp } from './ctx'
 import { type EventView } from './useKodyl'
 import { type RosterEntry, getRoster } from './logs'
@@ -16,7 +16,7 @@ const MIN_START_AHEAD = 3 * 3600
 
 export function Discover() {
   const { events, loading, error } = useApp()
-  const open = events.filter((e) => e.state === 0 && !e.cancelled)
+  const open = events.filter((e) => e.state === STATE.Registration && !e.cancelled)
   return (
     <>
       <div className="page-head">
@@ -80,12 +80,12 @@ export function EventPage({ id }: { id: bigint }) {
       </div>
       {meta?.description && <p className="desc">{meta.description}</p>}
       {meta?.location && <p className="loc">{meta.location}</p>}
-      {ev.state < 3 && !ev.cancelled && (
+      {ev.state < STATE.Settled && !ev.cancelled && (
         <p className="countdown">
           &rarr; {STATE_LABELS[ev.state + 1] ?? 'Settled'} in {fmtDuration(Number(nextPhaseTs(ev)) - now)}
         </p>
       )}
-      {ev.state === 2 && ev.myStatus === 3 && (
+      {ev.state === STATE.Dispute && ev.myStatus === STATUS.CheckedIn && (
         <>
           <p className="countdown">
             Your payout ({fmtEth(ev.deposit + ev.reward)}) unlocks in {fmtDuration(Number(nextPhaseTs(ev)) - now)}.
@@ -104,7 +104,7 @@ export function EventPage({ id }: { id: bigint }) {
         <div><span>Claimed</span><b>{ev.claimedCount.toString()}</b></div>
         {/* The reward is a moving projection until Settled: one late check-in
             during Dispute can change it several-fold. */}
-        <div><span>Reward / attendee</span><b>{fmtEth(ev.reward)}{ev.state < 3 ? ' (projected)' : ''}</b></div>
+        <div><span>Reward / attendee</span><b>{fmtEth(ev.reward)}{ev.state < STATE.Settled ? ' (projected)' : ''}</b></div>
         <div><span>Starts</span><b>{fmtTime(ev.eventStart)}</b></div>
         <div><span>Ends</span><b>{fmtTime(ev.eventEnd)}</b></div>
         <div><span>Cancel by</span><b>{fmtTime(ev.cancellationDeadline)}</b></div>
@@ -149,15 +149,15 @@ export function EventPage({ id }: { id: bigint }) {
 
 export function MyTickets() {
   const { events, session, loading } = useApp()
-  const mine = events.filter((e) => e.myStatus !== 0)
-  const upcoming = mine.filter((e) => e.state < 3 && !e.cancelled)
+  const mine = events.filter((e) => e.myStatus !== STATUS.None)
+  const upcoming = mine.filter((e) => e.state < STATE.Settled && !e.cancelled)
   // A swept payout is no longer claimable - it must not read as "Action needed".
   // Refunds count as action: cancelled events and abandoned ones (settled
   // with zero check-ins) both leave a still-registered attendee owed money.
   const toClaim = mine.filter(
     (e) =>
-      (e.state === 3 && e.myStatus === 3 && !payoutSwept(e)) ||
-      ((e.cancelled || (e.state === 3 && e.checkedInCount === 0n)) && e.myStatus === 1),
+      (e.state === STATE.Settled && e.myStatus === STATUS.CheckedIn && !payoutSwept(e)) ||
+      ((e.cancelled || (e.state === STATE.Settled && e.checkedInCount === 0n)) && e.myStatus === STATUS.Registered),
   )
   const past = mine.filter((e) => !upcoming.includes(e) && !toClaim.includes(e))
 
