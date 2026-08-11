@@ -25,6 +25,7 @@ export type EventView = {
   claimedCount: bigint
   held: bigint
   reward: bigint
+  rebate: bigint
   myStatus: number
 }
 
@@ -53,7 +54,7 @@ async function loadEvent(id: bigint, me: `0x${string}`, cache: Map<string, Param
     }
     cache.set(id.toString(), params)
   }
-  const [meta, cancelled, state, reg, chk, clm, held, reward, myStatus] = await Promise.all([
+  const [meta, cancelled, state, reg, chk, clm, held, reward, rebate, myStatus] = await Promise.all([
     read<string>('metadataURI', [id]),
     read<boolean>('cancelled', [id]),
     read<bigint>('getState', [id]),
@@ -62,6 +63,7 @@ async function loadEvent(id: bigint, me: `0x${string}`, cache: Map<string, Param
     read<bigint>('claimedCount', [id]),
     read<bigint>('held', [id]),
     read<bigint>('rewardPerAttendee', [id]),
+    read<bigint>('noShowRebate', [id]),
     read<bigint>('attendees', [id, me]),
   ])
   return {
@@ -75,6 +77,7 @@ async function loadEvent(id: bigint, me: `0x${string}`, cache: Map<string, Param
     claimedCount: clm,
     held,
     reward,
+    rebate,
     myStatus: Number(myStatus),
   }
 }

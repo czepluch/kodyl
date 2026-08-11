@@ -26,13 +26,14 @@ const DEPLOY_BLOCK = BigInt((deployment as { deployBlock?: number }).deployBlock
 const MAX_LOGS_RANGE = 9000n // blocks per eth_getLogs request
 
 // The attendee-status-affecting events, and the status each implies.
-const ROSTER_EVENTS = ['Registered', 'RegistrationCancelled', 'CheckedIn', 'RefundClaimed', 'Claimed'] as const
+const ROSTER_EVENTS = ['Registered', 'RegistrationCancelled', 'CheckedIn', 'RefundClaimed', 'Claimed', 'RebateClaimed'] as const
 const STATUS_OF: Record<string, string> = {
   Registered: 'Registered',
   RegistrationCancelled: 'Cancelled',
   CheckedIn: 'Checked in',
   RefundClaimed: 'Refunded',
   Claimed: 'Claimed',
+  RebateClaimed: 'Rebated',
 }
 
 type AnyLog = Log & { eventName?: string; args?: Record<string, unknown> }

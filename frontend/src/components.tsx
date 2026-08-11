@@ -169,6 +169,14 @@ export function EventActions({ ev, roster }: { ev: EventView; roster?: RosterEnt
           Claim refund
         </button>
       )}
+      {ev.state === STATE.Settled && ev.myStatus === STATUS.Registered && ev.rebate > 0n && (
+        // A no-show's pull-claim for the reward cap's excess (nonzero only
+        // when the cap was binding; mutually exclusive with the abandoned
+        // refund above, which needs zero check-ins).
+        <button disabled={disabled} onClick={() => run('Claim rebate', () => session.sendTx('claimNoShowRebate', [ev.id]))}>
+          Claim {fmtEth(ev.rebate)} rebate
+        </button>
+      )}
       {ev.myStatus === STATUS.Registered && !ev.cancelled && ev.state < STATE.Settled && <TicketButton ev={ev} />}
       {ev.state === STATE.Settled && ev.myStatus === STATUS.CheckedIn && !swept && (
         <button disabled={disabled} onClick={() => run('Claim payout', () => session.sendTx('claim', [ev.id]))}>

@@ -123,11 +123,13 @@ contract KodylEconTest is Test {
     }
 
     // ==================================================================
-    // 2. Sybil capture: exclude everyone honest, check in one sock puppet.
-    // The sybil's own deposit round-trips, so the attack costs only gas.
+    // 2. Sybil capture, bounded by C1: the fake-event scam. Exclude everyone
+    // honest, check in one sock puppet - the reward cap holds the sybil to
+    // ONE deposit of profit however many victims registered, and the excess
+    // rebates to the victims.
     // ==================================================================
 
-    function test_econ_sybilCapturesWholePot() public {
+    function test_econ_sybilCaptureBoundedToOneDeposit() public {
         uint256 eid = _create(DEPOSIT);
         address[] memory honest = _actors("honest", 10);
         address sybil = makeAddr("sybil");
@@ -142,16 +144,25 @@ contract KodylEconTest is Test {
         vm.prank(sybil);
         k.claim(eid);
 
-        // The sybil's stake was never at risk: funded 1 deposit, holds 11.
-        assertEq(sybil.balance, 11 * DEPOSIT, "sybil claims the whole pot");
-        for (uint256 i = 0; i < 10; ++i) {
-            assertEq(honest[i].balance, 0, "every honest attendee loses the deposit");
-        }
-        assertEq(organizer.balance, 0, "profit routes through the sybil, not the organizer account");
-        assertEq(address(k).balance, 0, "no dust: forfeitures divide by one claimant exactly");
+        // The cap: deposit back plus at most one deposit of reward. Profit is
+        // one deposit total, for ten victims - the scam does not scale.
+        assertEq(sybil.balance, 2 * DEPOSIT, "capture is capped at one deposit of profit");
 
-        // The on-chain footprint an indexer sees: 11 registered, 1 checked in,
-        // 1 claimed - the loud red-flag ratio.
+        // The capped-off excess rebates to the victims: 9d across 10 no-shows.
+        uint256 rebate = (9 * DEPOSIT) / 10;
+        assertEq(k.noShowRebate(eid), rebate);
+        for (uint256 i = 0; i < 10; ++i) {
+            vm.prank(honest[i]);
+            k.claimNoShowRebate(eid);
+            assertEq(honest[i].balance, rebate, "victim recovers 90 percent");
+        }
+        // Aggregate victim loss equals the attacker's profit exactly.
+        assertEq(10 * (DEPOSIT - rebate), DEPOSIT, "total victim loss == capped profit");
+        assertEq(organizer.balance, 0, "profit routes through the sybil, not the organizer account");
+        assertEq(address(k).balance, 0, "pot fully distributed");
+
+        // The on-chain footprint an indexer sees: 11 registered, 1 checked in
+        // - the loud red-flag ratio - now with ten RebateClaimed logs too.
         assertEq(k.registeredCount(eid), 11);
         assertEq(k.checkedInCount(eid), 1);
         assertEq(k.claimedCount(eid), 1);
@@ -341,11 +352,14 @@ contract KodylEconTest is Test {
         vm.prank(sybil);
         k.claim(eid);
 
-        // Identical payoff shape to the organizer's own capture: n honest
-        // deposits, profit n*d, sybil stake never at risk.
-        assertEq(sybil.balance, 4 * DEPOSIT, "operator-attested sybil captures the pot");
+        // Identical payoff shape to the organizer's own capture: capped at
+        // one deposit of profit, the excess rebating to the victims.
+        assertEq(sybil.balance, 2 * DEPOSIT, "operator-attested capture capped like the organizer's");
+        uint256 rebate = (2 * DEPOSIT) / 3;
         for (uint256 i = 0; i < 3; ++i) {
-            assertEq(honest[i].balance, 0);
+            vm.prank(honest[i]);
+            k.claimNoShowRebate(eid);
+            assertEq(honest[i].balance, rebate);
         }
         // Neither authority figure moves ETH on-chain; the split is off-chain.
         assertEq(operator.balance, 0);
@@ -423,9 +437,10 @@ contract KodylEconTest is Test {
     // Fuzzed payoff formulas.
     // ==================================================================
 
-    /// Sybil capture profit is exactly nHonest * deposit, for any turnout and
-    /// deposit size, and the sybil's stake is never at risk.
-    function testFuzz_econ_sybilProfitExact(uint256 nHonest, uint256 dep) public {
+    /// Sybil capture profit is capped at exactly one deposit for ANY number
+    /// of victims and any deposit size; each victim's rebate recovers all but
+    /// their pro-rata share of that one deposit.
+    function testFuzz_econ_sybilProfitCappedAtOneDeposit(uint256 nHonest, uint256 dep) public {
         nHonest = bound(nHonest, 1, 20);
         dep = bound(dep, 1 wei, 100 ether);
 
@@ -442,12 +457,29 @@ contract KodylEconTest is Test {
         _settle();
         vm.prank(sybil);
         k.claim(eid);
-        assertEq(sybil.balance, (nHonest + 1) * dep, "profit = nHonest * deposit exactly");
+        assertEq(sybil.balance, 2 * dep, "profit capped at one deposit, victims notwithstanding");
         assertGe(sybil.balance, dep, "the sybil's own deposit was never at risk");
+
+        // Every victim recovers floor((nHonest-1)*d/nHonest); at nHonest == 1
+        // the excess is zero and the rebate path reports NothingToRebate.
+        uint256 rebate = ((nHonest - 1) * dep) / nHonest;
+        for (uint256 i = 0; i < nHonest; ++i) {
+            if (rebate > 0) {
+                vm.prank(honest[i]);
+                k.claimNoShowRebate(eid);
+            } else {
+                vm.prank(honest[i]);
+                vm.expectRevert(KodylAbi.NothingToRebate.selector);
+                k.claimNoShowRebate(eid);
+            }
+            assertEq(honest[i].balance, rebate, "victim rebate exact");
+        }
     }
 
-    /// Skim arithmetic: c honest + s sybils checked in, m no-shows. Every
-    /// claimant gets floor(m*d/(c+s)); the remainder is maintainer dust.
+    /// Skim arithmetic under the cap: c honest + s sybils checked in, m
+    /// no-shows. Every claimant gets min(floor(m*d/(c+s)), d); when the cap
+    /// binds (m > c+s) the excess rebates to the no-shows and only the
+    /// remainder is dust (post-timeout).
     function testFuzz_econ_skimShareExact(uint256 c, uint256 s, uint256 m, uint256 dep) public {
         c = bound(c, 1, 6);
         s = bound(s, 1, 6);
@@ -469,7 +501,8 @@ contract KodylEconTest is Test {
         vm.stopPrank();
 
         _settle();
-        uint256 share = (m * dep) / (c + s);
+        uint256 uncapped = (m * dep) / (c + s);
+        uint256 share = uncapped > dep ? dep : uncapped;
         for (uint256 i = 0; i < c; ++i) {
             vm.prank(hon[i]);
             k.claim(eid);
@@ -484,8 +517,16 @@ contract KodylEconTest is Test {
         }
         assertEq(sybilTotal, s * share, "sybil block extraction");
 
-        uint256 remainder = (m * dep) % (c + s);
+        // Rebate leg (cap binding) and dust remainder, both regimes exact.
+        uint256 rebatePer = m * dep > (c + s) * dep ? (m * dep - (c + s) * dep) / m : 0;
+        for (uint256 i = 0; i < m && rebatePer > 0; ++i) {
+            vm.prank(ns[i]);
+            k.claimNoShowRebate(eid);
+            assertEq(ns[i].balance, rebatePer, "no-show rebate share");
+        }
+        uint256 remainder = rebatePer > 0 ? (m * dep - (c + s) * dep) % m : (m * dep) % (c + s);
         if (remainder > 0) {
+            if (rebatePer > 0) vm.warp(eventEnd + disputePeriod + 30 days + 1);
             k.claimDust(eid);
         }
         assertEq(maintainer.balance, remainder, "dust = division remainder");

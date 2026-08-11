@@ -23,6 +23,7 @@ const FRIENDLY: Record<string, (args: readonly unknown[]) => string> = {
   EventNotCancelled: () => 'The event is not cancelled, so there is no refund.',
   NotSettled: () => 'The event is not settled yet.',
   PayoutSwept: () => 'The payout was swept to the maintainer after the claim timeout.',
+  NothingToRebate: () => 'There is no rebate for this event: the attendance reward never hit its cap.',
   CheckInWindowClosed: () => 'The check-in window has closed.',
   BatchTooLarge: (a) =>
     a.length >= 2 ? `The batch has ${a[0]} attendees; the limit is ${a[1]}.` : 'The check-in batch is too large.',

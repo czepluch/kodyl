@@ -73,9 +73,9 @@ export function walletFor(pk: Hex) {
 // ADT ordinals exposed across the ABI boundary as uint256 (see Kodyl.solc).
 // Compare with STATE/STATUS, render with the label tables (same ordinals).
 export const STATE_LABELS = ['Registration', 'Active', 'Dispute', 'Settled', 'Cancelled'] as const
-export const STATUS_LABELS = ['None', 'Registered', 'Cancelled', 'Checked in', 'Claimed'] as const
+export const STATUS_LABELS = ['None', 'Registered', 'Cancelled', 'Checked in', 'Claimed', 'Rebated'] as const
 export const STATE = { Registration: 0, Active: 1, Dispute: 2, Settled: 3, Cancelled: 4 } as const
-export const STATUS = { None: 0, Registered: 1, Cancelled: 2, CheckedIn: 3, Claimed: 4 } as const
+export const STATUS = { None: 0, Registered: 1, Cancelled: 2, CheckedIn: 3, Claimed: 4, Rebated: 5 } as const
 
 // Voucher mailbox (phase 2 service). Override with VITE_MAILBOX_URL; the demo
 // default matches `node mailbox/server.mjs`. Trailing slash trimmed so URL

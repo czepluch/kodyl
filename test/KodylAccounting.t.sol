@@ -203,9 +203,6 @@ contract KodylAccountingTest is Test {
 
         vm.warp(eventEnd + disputePeriod + 1);
 
-        uint256 totalDeposited = dep * nRegistered;
-        uint256 paidOut;
-
         if (nCheckedIn == 0) {
             // Zero check-ins is abandonment: no dust path ever (even past the
             // sweep timeout), the pot refunds in full and never expires.
@@ -214,42 +211,64 @@ contract KodylAccountingTest is Test {
             vm.warp(eventEnd + disputePeriod + 30 days + 1);
             vm.expectRevert(IKodyl.DustNotClaimable.selector);
             k.claimDust(eid);
+            uint256 refunded;
             for (uint256 i = 0; i < nRegistered; ++i) {
-                uint256 before = who[i].balance;
                 vm.prank(who[i]);
                 k.claimRefund(eid);
-                paidOut += who[i].balance - before;
                 assertEq(who[i].balance, dep, "full refund");
+                refunded += dep;
             }
-            assertEq(paidOut, totalDeposited, "abandonment refunds conserve");
+            assertEq(refunded, dep * nRegistered, "abandonment refunds conserve");
             assertEq(k.held(eid), 0);
             assertEq(maintainer.balance, 0, "maintainer gets nothing from abandonment");
             return;
         }
 
-        for (uint256 i = 0; i < nCheckedIn; ++i) {
-            uint256 before = who[i].balance;
+        _settleChecked(eid, dep, nRegistered, nCheckedIn, who);
+    }
+
+    // Settlement half of _conservationRun for the checked-in regime, split
+    // out to keep both functions under the compiler's stack budget.
+    function _settleChecked(uint256 eid, uint256 dep, uint256 nReg, uint256 nChk, address[] memory who) internal {
+        uint256 paidOut;
+        for (uint256 i = 0; i < nChk; ++i) {
             vm.prank(who[i]);
             k.claim(eid);
-            paidOut += who[i].balance - before;
+            paidOut += who[i].balance;
+        }
+
+        // The reward cap's rebate leg: when forfeitures exceed the claimants'
+        // capped total, each no-show pulls its pro-rata share of the excess.
+        uint256 noShow = nReg - nChk;
+        uint256 fairReward = (noShow * dep) / nChk > dep ? dep : (noShow * dep) / nChk;
+        uint256 rebatePer = noShow * dep > nChk * dep ? (noShow * dep - nChk * dep) / noShow : 0;
+        uint256 rebatesPaid;
+        for (uint256 i = nChk; i < nReg && rebatePer > 0; ++i) {
+            vm.prank(who[i]);
+            k.claimNoShowRebate(eid);
+            assertEq(who[i].balance, rebatePer, "per-no-show rebate");
+            rebatesPaid += rebatePer;
         }
 
         uint256 dust = k.held(eid);
-        uint256 mBefore = maintainer.balance;
         if (dust > 0) {
+            // With a rebate pool the early all-claimed door is shut; the
+            // remainder is sweepable only after the timeout.
+            if (rebatePer > 0) vm.warp(eventEnd + disputePeriod + 30 days + 1);
             k.claimDust(eid);
-            assertEq(maintainer.balance - mBefore, dust, "dust payout mismatch");
+            assertEq(maintainer.balance, dust, "dust payout mismatch");
         }
 
-        // The core property: every wei deposited left as either a payout or dust.
-        assertEq(paidOut + dust, totalDeposited, "ETH not conserved for event");
+        // The core property: every wei deposited left as a payout, a rebate,
+        // or dust - and no claimant got more than deposit + the capped reward.
+        assertEq(paidOut + rebatesPaid + dust, dep * nReg, "ETH not conserved for event");
         assertEq(k.held(eid), 0);
-
-        // No claimant received more than deposit + floor(fair reward).
-        uint256 noShow = nRegistered - nCheckedIn;
-        uint256 fairReward = (noShow * dep) / nCheckedIn;
-        assertEq(paidOut, nCheckedIn * (dep + fairReward), "reward math drift");
-        assertEq(dust, (noShow * dep) % nCheckedIn, "dust != remainder");
+        assertEq(paidOut, nChk * (dep + fairReward), "reward math drift");
+        if (rebatePer > 0) {
+            assertEq(dust, (noShow * dep - nChk * dep) % noShow, "dust != rebate remainder");
+        } else {
+            assertEq(dust, (noShow * dep) % nChk, "dust != remainder");
+        }
     }
 
     function test_conservation_indivisible7wei() public {

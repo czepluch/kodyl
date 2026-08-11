@@ -21,6 +21,10 @@ against the compiled Core Solidity bytecode (`test/Kodyl.t.sol` unless noted).
 | Check-in window: eventStart through eventEnd + disputePeriod | test_checkIn_revertsOutsideWindow, test_checkIn_windowBackEdge (inclusive at exactly end + dispute, closed at +1 for both checkIn and checkInBatch), test_getState_transitionsOverTime |
 | Pull-only claims after dispute period | test_claim_paysDepositPlusReward, test_claim_revertsBeforeSettledAndWhenNotCheckedIn, test_claim_andDustRevertDuringDispute (still NotSettled at the inclusive Dispute back edge) |
 | Pro-rata no-show distribution + reward math | test_claim_paysDepositPlusReward (3 reg / 2 checked / 0.5 ETH each) |
+| Reward capped at REWARD_CAP_MULTIPLE (1) deposit; boundary at noShows == checkedIn has no rebate | test_rewardCap_boundaryAtEqualCounts |
+| No-show rebate: gates (NotSettled, wrong status, NothingToRebate), RebateClaimed event, terminal Rebated status, frozen counter math | test_claimNoShowRebate_gatesAndFrozenMath, test_rewardCap_boundaryAtEqualCounts |
+| Late rebate after the timeout sweep reverts PayoutSwept | test_claimNoShowRebate_afterSweepRevertsPayoutSwept |
+| Early all-claimed dust stays shut while a rebate pool exists | test_claimDust_waitsForTimeoutWhileRebatePoolExists |
 | Dust to maintainer after all claims or timeout | test_claimDust_remainderAfterAllClaims, test_claimDust_gatesAndTimeout, test_claimDust_revertsWhenPotEmpty (exact division leaves a zero pot: DustNotClaimable) |
 | Zero check-ins: abandonment - refunds forever, no dust path even past the sweep timeout, refund gate opens only at Settled | test_claimRefund_zeroCheckInAbandonment |
 | A late check-in during Dispute flips an abandoning event into normal settlement (refunds never open) | test_claimRefund_abandonmentClosedByLateCheckIn |
@@ -91,12 +95,13 @@ tests attack the accounting that has to earn back per-event isolation.
 | Reentrant claimDust during payout extracts nothing | test_reentrancy_claimDustGainsNothing |
 | Reentrant cross-event cancel keeps all pots consistent | test_reentrancy_crossEventCancelStaysConsistent |
 | Exact per-event conservation at indivisible deposits (7 wei, 100 wei, prime splits) | test_conservation_indivisible7wei, test_conservation_primeSplit |
-| Reward = floor(noShow*deposit/checkedIn), dust = remainder, no wei created/lost | test_conservation_* (all six) |
+| Reward = min(floor(noShow*deposit/checkedIn), deposit), excess rebated per no-show, dust = remainder, no wei created/lost | test_conservation_* (all six; oneCheckinManyNoShows and primeSplit exercise the rebate leg) |
 | Late claim after the timeout dust-sweep reverts PayoutSwept() (clear error, no ETH conjured) | test_lateClaimAfterDustSweep_failsSafely |
 | Full-lifecycle three-way ledger equality (sum(held) == totalHeld, balance == totalHeld + forced ETH) | KodylConservation: invariant_ledgerThreeWayEquality (128k calls) |
 | Compiler-independent ETH conservation (in + forced - out == balance) | invariant_ethConserved (128k calls) |
 | Per-event pot == its own deposits minus payouts (catches cross-event leak) | invariant_perEventConserved (128k calls) |
-| Every successful claim pays exactly deposit + floor(noShow * deposit / checkedIn), checked per claim against an independent ghost model | invariant_claimPayoutsExact (128k calls) |
+| Every successful claim pays exactly deposit + min(floor(noShow * deposit / checkedIn), deposit), checked per claim against an independent ghost model | invariant_claimPayoutsExact (128k calls) |
+| Every successful claimNoShowRebate pays exactly the ghost-model per-no-show excess | invariant_rebatePayoutsExact (128k calls) |
 
 The lifecycle handler is phase-aware: each action scans an independent ghost
 model of the protocol for an (event, actor) pair that lets the call succeed,
@@ -182,10 +187,10 @@ counters an indexer would see. Every number in `ECONOMICS.md` resolves here.
 | Claim | Test |
 |---|---|
 | Honest baseline: claimants get deposit + floor share, no-shows -d, remainder is dust | test_econ_honestBaseline |
-| Organizer sybil capture takes the whole pot; footprint 11/1/1 | test_econ_sybilCapturesWholePot |
-| Sybil capture profit is exactly nHonest * d, stake never at risk (fuzzed) | testFuzz_econ_sybilProfitExact |
+| Organizer sybil capture is capped at one deposit of profit; victims rebate 90 percent; footprint 11/1/1 | test_econ_sybilCaptureBoundedToOneDeposit |
+| Sybil capture profit is exactly one deposit for any victim count; victim rebates exact (fuzzed) | testFuzz_econ_sybilProfitCappedAtOneDeposit |
 | Sybil skim dilutes each honest claimant vs the s=0 counterfactual | test_econ_sybilSkimsForfeitures |
-| Skim share floor(m*d/(c+s)), block total, and dust remainder (fuzzed) | testFuzz_econ_skimShareExact |
+| Skim share min(floor(m*d/(c+s)), d), rebate leg when capped, block total, and dust remainder (fuzzed) | testFuzz_econ_skimShareExact |
 | Excluding an attendee costs the organizer nothing; victim has no recourse | test_econ_exclusionGriefingIsFree |
 | Zero check-ins: abandonment refunds everyone in full, nobody profits, no sweep | test_econ_abandonmentRefundsEveryone |
 | The 30-day sweep takes a sleeper's full payout, reward included | test_econ_sweepTakesUnclaimedPayouts |

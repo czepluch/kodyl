@@ -40,7 +40,8 @@ export {
     dustClaimTimeout,
     minCancellationBuffer,
     disputePeriodMin,
-    disputePeriodMax
+    disputePeriodMax,
+    rewardCapMultiple
 };
 
 // --- protocol constants ---
@@ -55,6 +56,11 @@ function dustClaimTimeout() -> uint256 { return 2592000; }
 
 // 2 hours: minimum gap between the cancellation deadline and event start.
 function minCancellationBuffer() -> uint256 { return 7200; }
+
+// Attendance reward ceiling, as a multiple of the deposit: showing up can at
+// most double your stake. Bounds what a checked-in sybil can capture - the
+// excess above the cap rebates to the no-shows instead (see calcRebate).
+function rewardCapMultiple() -> uint256 { return 1; }
 
 // 1 hour: shortest allowed dispute period.
 function disputePeriodMin() -> uint256 { return 3600; }

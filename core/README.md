@@ -77,7 +77,7 @@ Build and test:
 forge test                       # forge is a harness only (see foundry.toml)
 ```
 
-`test/Kodyl.t.sol` (84 scenarios) and `test/KodylInvariant.t.sol` (128k-call
+`test/Kodyl.t.sol` (88 scenarios) and `test/KodylInvariant.t.sol` (128k-call
 ledger fuzz across three concurrent events), plus `test/KodylAccounting.t.sol`
 and `test/KodylConservation.t.sol` (reentrancy + full-lifecycle conservation)
 and `test/KodylEcon.t.sol` (the adversarial-economics payoff matrix behind
@@ -241,10 +241,13 @@ and can renumber under refactors - the `Counters` refactor did exactly that.
 
 ## Trust surface
 
-Check-in authority is custody. The organizer alone can capture every honest
-deposit by registering a sybil and checking in only the sybil: with ten
-honest attendees at 1 ETH each, the sybil claims 11 ETH at Settled - its own
-deposit plus all ten forfeitures. The inverse abuse - checking nobody in - is
+Check-in authority is custody, but its prize is bounded. An organizer who
+registers a sybil and checks in only the sybil captures at most one deposit
+of profit however many honest attendees registered: the attendance reward is
+capped at REWARD_CAP_MULTIPLE (1) deposit, and the capped-off excess rebates
+pro-rata to the no-shows (claimNoShowRebate) - with ten honest attendees at
+1 ETH each, the sybil claims 2 ETH and each victim recovers 0.9.
+The inverse abuse - checking nobody in - is
 defused: a zero-check-in settlement is abandonment, every attendee reclaims
 their deposit in full forever, and no sweep exists (the 30-day timeout sweep
 applies only to checked-in-but-unclaimed payouts). Attendees therefore trust

@@ -19,6 +19,7 @@ contract KodylTest is Test {
     event CheckedIn(uint256 indexed eventId, address indexed attendee);
     event Claimed(uint256 indexed eventId, address indexed attendee, uint256 amount);
     event RefundClaimed(uint256 indexed eventId, address indexed attendee, uint256 amount);
+    event RebateClaimed(uint256 indexed eventId, address indexed attendee, uint256 amount);
     event EventCancelled(uint256 indexed eventId);
     event MetadataUpdated(uint256 indexed eventId, string newURI);
     event DustClaimed(uint256 indexed eventId, address indexed recipient, uint256 amount);
@@ -149,6 +150,10 @@ contract KodylTest is Test {
         k.metadataURI(99);
         vm.expectRevert(KodylAbi.EventNotFound.selector);
         k.rewardPerAttendee(99);
+        vm.expectRevert(KodylAbi.EventNotFound.selector);
+        k.noShowRebate(99);
+        vm.expectRevert(KodylAbi.EventNotFound.selector);
+        k.claimNoShowRebate(99);
         vm.prank(alice);
         vm.expectRevert(KodylAbi.EventNotFound.selector);
         k.cancel(99);
@@ -913,6 +918,118 @@ contract KodylTest is Test {
         vm.prank(alice);
         vm.expectRevert(abi.encodeWithSelector(KodylAbi.InvalidAttendeeStatus.selector, 2, 1));
         k.claimRefund(eid);
+    }
+
+    // ==================================================================
+    // reward cap + no-show rebate (C1)
+    // ==================================================================
+
+    function test_rewardCap_boundaryAtEqualCounts() public {
+        // noShows == chk: reward is exactly one deposit, the cap is not yet
+        // binding, and there is nothing to rebate.
+        uint256 eid = _create();
+        _register(eid, alice);
+        _register(eid, bob);
+        _toActive();
+        vm.prank(organizer);
+        k.checkIn(eid, alice);
+        _toSettled();
+        assertEq(k.REWARD_CAP_MULTIPLE(), 1);
+        assertEq(k.rewardPerAttendee(eid), DEPOSIT);
+        assertEq(k.noShowRebate(eid), 0);
+        vm.prank(bob);
+        vm.expectRevert(KodylAbi.NothingToRebate.selector);
+        k.claimNoShowRebate(eid);
+    }
+
+    function test_claimNoShowRebate_gatesAndFrozenMath() public {
+        // 3 registered, 1 checked in: reward capped at d (uncapped 2d), the
+        // excess d rebates 0.5d to each of the two no-shows.
+        uint256 eid = _create();
+        _register(eid, alice);
+        _register(eid, bob);
+        _register(eid, carol);
+        _toActive();
+        vm.prank(organizer);
+        k.checkIn(eid, alice);
+
+        vm.prank(bob);
+        vm.expectRevert(KodylAbi.NotSettled.selector);
+        k.claimNoShowRebate(eid);
+
+        _toSettled();
+        assertEq(k.rewardPerAttendee(eid), DEPOSIT);
+        assertEq(k.noShowRebate(eid), DEPOSIT / 2);
+
+        // A checked-in claimant is not a no-show.
+        vm.prank(alice);
+        vm.expectRevert(abi.encodeWithSelector(KodylAbi.InvalidAttendeeStatus.selector, 3, 1));
+        k.claimNoShowRebate(eid);
+
+        vm.prank(bob);
+        vm.expectEmit(true, true, false, true);
+        emit RebateClaimed(eid, bob, DEPOSIT / 2);
+        k.claimNoShowRebate(eid);
+        assertEq(bob.balance, DEPOSIT / 2);
+        assertEq(k.attendees(eid, bob), 5); // terminal Rebated
+
+        vm.prank(bob);
+        vm.expectRevert(abi.encodeWithSelector(KodylAbi.InvalidAttendeeStatus.selector, 5, 1));
+        k.claimNoShowRebate(eid);
+
+        // Frozen math: bob's rebate did not move alice's payout (the rebate
+        // deliberately leaves registeredCount untouched).
+        vm.prank(alice);
+        k.claim(eid);
+        assertEq(alice.balance, 2 * DEPOSIT);
+
+        vm.prank(carol);
+        k.claimNoShowRebate(eid);
+        assertEq(carol.balance, DEPOSIT / 2);
+        assertEq(k.held(eid), 0);
+        assertEq(k.totalHeld(), 0);
+    }
+
+    function test_claimNoShowRebate_afterSweepRevertsPayoutSwept() public {
+        uint256 eid = _create();
+        _register(eid, alice);
+        _register(eid, bob);
+        _register(eid, carol);
+        _toActive();
+        vm.prank(organizer);
+        k.checkIn(eid, alice);
+        // Nobody claims or rebates within the window; the sweep takes the
+        // whole pot, unclaimed rebates included.
+        vm.warp(eventEnd + disputePeriod + 30 days + 1);
+        k.claimDust(eid);
+        vm.prank(bob);
+        vm.expectRevert(KodylAbi.PayoutSwept.selector);
+        k.claimNoShowRebate(eid);
+    }
+
+    function test_claimDust_waitsForTimeoutWhileRebatePoolExists() public {
+        uint256 eid = _create();
+        _register(eid, alice);
+        _register(eid, bob);
+        _register(eid, carol);
+        _toActive();
+        vm.prank(organizer);
+        k.checkIn(eid, alice);
+        _toSettled();
+        vm.prank(alice);
+        k.claim(eid);
+        // Every claimant has claimed, but the pot still owes two rebates:
+        // the early all-claimed door must stay shut.
+        vm.expectRevert(KodylAbi.DustNotClaimable.selector);
+        k.claimDust(eid);
+        vm.prank(bob);
+        k.claimNoShowRebate(eid);
+        vm.prank(carol);
+        k.claimNoShowRebate(eid);
+        // 0.5d each drained the pot exactly; nothing left for dust.
+        assertEq(k.held(eid), 0);
+        vm.expectRevert(KodylAbi.DustNotClaimable.selector);
+        k.claimDust(eid);
     }
 
     function test_claimRefund_abandonmentClosedByLateCheckIn() public {

@@ -28,7 +28,7 @@ This is a reimplementation/evolution of [Kickback](https://kickback.events/), de
 ### No-Shows
 
 - Attendees who neither cancel nor check in forfeit their deposit
-- Forfeited deposits are distributed pro-rata among checked-in attendees
+- Forfeited deposits are distributed pro-rata among checked-in attendees, capped at one deposit per attendee; any excess rebates to the no-shows (see Settlement)
 - If nobody checks in, the event settles as **abandoned**: every registered attendee can reclaim their deposit in full (`claimRefund`, forever - see Settlement)
 
 ### Event Cancellation
@@ -163,7 +163,8 @@ enum AttendeeStatus {
     Registered, // Deposited, not yet checked in
     Cancelled,  // Cancelled or refunded, deposit returned
     CheckedIn,  // Verified attendance
-    Claimed     // Already claimed payout
+    Claimed,    // Already claimed payout
+    Rebated     // No-show who claimed the reward cap's excess rebate
 }
 ```
 
@@ -171,11 +172,12 @@ enum AttendeeStatus {
 - `None → Registered` (register, Registration state only)
 - `Registered → Cancelled` (cancel through the deadline, or claimRefund on a cancelled or abandoned event)
 - `Registered → CheckedIn` (organizer check-in, Active or Dispute)
+- `Registered → Rebated` (claimNoShowRebate at Settled, only when the reward cap left an excess; deliberately does NOT touch `registeredCount`, so reward and rebate math stay frozen for later claimants)
 - `Cancelled → Registered` (re-register with a new deposit; only while the state is Registration, so impossible once the event has started or been cancelled)
 - `CheckedIn → Claimed` (claim at Settled, if the pot has not been swept)
 
 **Invalid transitions (revert):**
-- `Claimed → anything` (terminal - no re-registration after claiming)
+- `Claimed → anything`, `Rebated → anything` (terminal)
 - `CheckedIn → Cancelled` (can't cancel after check-in)
 - `CheckedIn → Registered` (can't re-register after check-in)
 - `Registered → Registered` (already registered)
@@ -197,20 +199,21 @@ Note: `registeredCount` tracks *current* registrations (not historical). Cancell
 |-------|-------------|
 | No-shows | `registeredCount - checkedInCount` |
 | Total forfeited | `noShowCount * depositAmount` |
-| Reward per attendee | `checkedInCount > 0 ? totalForfeited / checkedInCount : 0` (floor division) |
+| Reward per attendee | `min(totalForfeited / checkedInCount, REWARD_CAP_MULTIPLE * depositAmount)` (floor division; 0 with zero check-ins) |
 | Attendee payout | `depositAmount + rewardPerAttendee` |
-| Dust | Whatever remains in the event's pot after all claims (`totalForfeited % checkedInCount` when everyone claims) |
+| Rebate per no-show | `totalForfeited > checkedInCount * cap ? (totalForfeited - checkedInCount * cap) / noShowCount : 0` where `cap = REWARD_CAP_MULTIPLE * depositAmount` |
+| Dust | Whatever remains in the event's pot after all claims and rebates (a floor-division remainder) |
 
-Both counts are frozen once the event settles (no registration, cancellation, or check-in can occur), so every claimer receives the same payout. During Dispute, each late check-in moves the projected reward (fewer no-shows, more claimants) - the number is not final until Settled.
+Both counts are frozen once the event settles (no registration, cancellation, or check-in can occur), and a rebate claim deliberately leaves them untouched - so every claimer receives the same payout and every no-show the same rebate. During Dispute, each late check-in moves the projected numbers - they are not final until Settled.
 
 ### Read Surface
 
 Two deliberate tiers:
 
-- **Record-backed getters** - `getEvent` (all 7 parameters), `organizer`, `getState`, `metadataURI`, `rewardPerAttendee` - revert `EventNotFound` for an unknown id: they answer questions that are meaningless without an event.
+- **Record-backed getters** - `getEvent` (all 7 parameters), `organizer`, `getState`, `metadataURI`, `rewardPerAttendee`, `noShowRebate` - revert `EventNotFound` for an unknown id: they answer questions that are meaningless without an event.
 - **Mapping-backed getters** - `attendees` (status), `cancelled`, `registeredCount`, `checkedInCount`, `claimedCount`, `held` - return zero for an unknown id, mirroring Solidity public-mapping semantics.
 
-Global reads: `eventCount`, `totalHeld`, `maintainer`, and the protocol constants (`MAX_BATCH_SIZE`, `DUST_CLAIM_TIMEOUT`, `MIN_CANCELLATION_BUFFER`).
+Global reads: `eventCount`, `totalHeld`, `maintainer`, and the protocol constants (`MAX_BATCH_SIZE`, `DUST_CLAIM_TIMEOUT`, `MIN_CANCELLATION_BUFFER`, `REWARD_CAP_MULTIPLE`).
 
 ## Check-in
 
@@ -348,6 +351,40 @@ function claim(uint256 eid) external {
 - Simpler: no pagination logic needed
 - Fair: each attendee pays their own gas
 
+### Reward Cap and No-Show Rebate
+
+`rewardPerAttendee` is capped at `REWARD_CAP_MULTIPLE * depositAmount`
+(multiple = 1): **showing up can at most double your stake**. The forfeitures
+the cap keeps away from the claimants rebate pro-rata to the no-shows, as a
+pull-claim:
+
+```solidity
+function claimNoShowRebate(uint256 eid) external {
+    require(getState(eid) == State.Settled, NotSettled());
+    require(noShowRebate(eid) != 0, NothingToRebate());  // cap not binding, or zero check-ins
+    require(status[eid][msg.sender] == AttendeeStatus.Registered, InvalidAttendeeStatus());
+    require(rebate <= held[eid], PayoutSwept());          // pot already swept after the timeout
+
+    status[eid][msg.sender] = AttendeeStatus.Rebated;     // terminal; counters untouched
+    held[eid] -= rebate;
+    totalHeld -= rebate;
+    send(msg.sender, rebate);
+}
+```
+
+The cap never binds in an ordinary event: with no-shows at most equal to
+attendees the pro-rata reward is at most one deposit and nothing changes.
+It binds exactly when no-shows outnumber attendees - the regime produced by a
+snowstorm, a moved venue, or a fake event with one sock-puppet check-in. In
+all of those, routing a jackpot to a tiny claimant group is the wrong outcome:
+the cap holds a sybil's capture to **one deposit of profit however many
+victims registered** (the acquisition cost of a credible fake event exceeds
+that), and the victims recover everything but their pro-rata share of that one
+deposit. The trade-off, accepted deliberately: no-shows receive partial mercy
+in extreme-forfeiture events, so the forfeiture threat is softest exactly
+where force majeure is likeliest. The economics are quantified in
+`ECONOMICS.md`.
+
 ### Dust Handling
 
 Due to floor division, some wei may remain after all claims. Example:
@@ -357,7 +394,9 @@ Due to floor division, some wei may remain after all claims. Example:
 - 1 wei dust remains (10 % 3 = 1)
 
 `claimDust(eid)` can be called by anyone once the event is settled **with at
-least one check-in** and either every checked-in attendee has claimed or a
+least one check-in** and either every checked-in attendee has claimed (and no
+rebate pool exists - there is no rebated-count on-chain, so while the cap left
+an excess the early door stays shut and only the timeout opens the sweep) or a
 30-day timeout has passed. Dust is **the event's own pot** - exact per-event
 accounting, never a reading of the shared contract balance - and goes to the
 project maintainer.
@@ -366,7 +405,7 @@ project maintainer.
 function claimDust(uint256 eid) external {
     require(getState(eid) == State.Settled, NotSettled());
     require(checkedInCount[eid] != 0, DustNotClaimable()); // abandoned pots refund, never sweep
-    require(claimedCount[eid] == checkedInCount[eid]
+    require((claimedCount[eid] == checkedInCount[eid] && noShowRebate(eid) == 0)
          || block.timestamp > eventEnd + disputePeriod + 30 days, DustNotClaimable());
 
     uint256 dust = held[eid];              // the per-event pot
@@ -377,7 +416,7 @@ function claimDust(uint256 eid) external {
 }
 ```
 
-**The timeout sweep takes unclaimed payouts too.** After the 30-day timeout the whole remaining pot - rounding dust *and* the payouts of checked-in attendees who never claimed - goes to the maintainer. A checked-in attendee who shows up later is told plainly: `claim` reverts `PayoutSwept()` (rather than underflowing into an opaque panic). Claim within 30 days of settlement or forfeit to the maintainer - that is the protocol's abandonment rule.
+**The timeout sweep takes unclaimed payouts and unclaimed rebates too.** After the 30-day timeout the whole remaining pot - rounding dust, the payouts of checked-in attendees who never claimed, *and* the rebates of no-shows who never claimed theirs - goes to the maintainer. A checked-in attendee who shows up later is told plainly: `claim` reverts `PayoutSwept()` (rather than underflowing into an opaque panic). Claim within 30 days of settlement or forfeit to the maintainer - that is the protocol's abandonment rule.
 
 ### Zero Check-ins: Abandonment
 
@@ -446,7 +485,7 @@ No reentrancy guard: status transitions are terminal and flip before any send (C
 
 **Check-in authority is custody.** The organizer decides who checked in, and check-in status is what money follows - so attendees trust the organizer with their stake, not merely with attendance bookkeeping:
 
-- **An organizer can capture honest deposits.** Register a sybil, check in only the sybil: with 10 honest attendees at 1 ETH each, the sybil claims 11 ETH at settlement (its own deposit plus all 10 forfeitures). No protocol rule prevents this.
+- **An organizer can still capture, but the take is capped.** Register a sybil, check in only the sybil: the reward cap holds the sybil's profit to ONE deposit however many honest attendees registered (with 10 honest attendees at 1 ETH each, the sybil claims 2 ETH, and the excess 9 ETH rebates back to the victims - each loses 0.1 ETH). The attestation power itself is not preventable; its prize is bounded.
 - **An organizer who checks in nobody achieves nothing** - a zero-check-in settlement is abandonment: every attendee reclaims their deposit in full and no sweep exists. (Checked-in-but-unclaimed payouts still sweep to the maintainer after 30 days - that rule is about claimant abandonment, not organizer abuse.)
 - Mitigations are economic and reputational only: an organizer who does this burns their ability to run future events. A future organizer-stake mechanism could add a slashing cost.
 
@@ -460,8 +499,8 @@ What the organizer *cannot* do: change any event parameter after creation, take 
 
 | Attack | Outcome / Mitigation |
 |--------|----------------------|
-| Organizer sybil check-in (register a sock puppet, check in only it) | **Not prevented** - the sybil claims the whole pot. Economic/reputational deterrence only; future: organizer stake |
-| Operator sybil check-in (an authorized operator attests presence for a sock puppet) | **Not prevented** - same surface as the organizer; appointing an operator grants the organizer's check-in power. On-chain, auditable (`isOperator`), revocable (`setOperator`) |
+| Organizer sybil check-in (register a sock puppet, check in only it) | **Bounded** - the reward cap holds the capture to one deposit of profit regardless of victim count; the excess rebates to the no-shows. Reputational deterrence covers the remainder |
+| Operator sybil check-in (an authorized operator attests presence for a sock puppet) | **Bounded** - same cap as the organizer; appointing an operator grants the organizer's check-in power. On-chain, auditable (`isOperator`), revocable (`setOperator`) |
 | Ticket sharing (an attendee forwards their signed `Ticket` to a friend) | **Tolerated by design** - no anti-share binding. The human at the door gates check-in: an operator signs `Presence` only after seeing a body |
 | Forged / replayed proof (wrong signer, wrong event, wrong chain) | Rejected on-chain: `TicketSignerMismatch`, `PresenceSignerUnauthorized`, or domain-mismatch (recovers a different signer). Malformed signatures revert (`MalleableSignatureRejected` / `ECRecoverFailed` / `InvalidSignatureLength`); after the dispute window every check-in reverts `CheckInWindowClosed` |
 | Organizer checks in nobody | **Defused** - zero-check-in settlement is abandonment: full refunds forever, no sweep, nobody profits |
@@ -490,7 +529,8 @@ verified against the bytecode by `test/KodylEcon.t.sol`.
 - [x] Manual check-in by organizer only (single and batch, max 100 per batch)
 - [x] Proof-based check-in (EIP-712 `Ticket` + `Presence`; anyone submits while check-in is open - the dispute window is the only time bound; single and batch)
 - [x] On-chain door operators per event (`setOperator`/`isOperator`)
-- [x] Pro-rata distribution of no-show deposits
+- [x] Pro-rata distribution of no-show deposits, capped at `REWARD_CAP_MULTIPLE` (1) deposit per attendee
+- [x] No-show rebate of the capped-off excess (`claimNoShowRebate`, terminal `Rebated` status)
 - [x] Dispute period for late check-in approval (bounded 1 hour to 30 days)
 - [x] Event cancellation with full refunds (before start only; refunds never expire)
 - [x] Pull-only claims (no `settleAll()`)

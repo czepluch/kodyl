@@ -20,10 +20,13 @@ import {IKodyl} from "./Kodyl.t.sol";
 /// Beyond wei conservation, the handler keeps an independent ghost model of
 /// the protocol (per-(event, actor) status, per-event registered / checked-in
 /// counts) and, on every successful claim, compares the claimant's balance
-/// delta against the model's payout: deposit + floor(noShow * deposit /
-/// checkedIn). Mismatches are recorded, not asserted, because a failed assert
+/// delta against the model's payout: deposit + min(floor(noShow * deposit /
+/// checkedIn), deposit) - the reward is capped at one deposit, with the
+/// excess rebated pro-rata to no-shows (claimNoShowRebate, checked the same
+/// way). Mismatches are recorded, not asserted, because a failed assert
 /// inside a handler is just another swallowed revert under
-/// fail_on_revert = false; the parent's invariant_claimPayoutsExact asserts.
+/// fail_on_revert = false; the parent's invariant_claimPayoutsExact and
+/// invariant_rebatePayoutsExact assert.
 contract LifecycleHandler is Test {
     // Attendee status ordinals, mirroring the contract's AttendeeStatus ADT.
     uint8 internal constant ST_NONE = 0;
@@ -31,6 +34,7 @@ contract LifecycleHandler is Test {
     uint8 internal constant ST_CANCELLED = 2;
     uint8 internal constant ST_CHECKED_IN = 3;
     uint8 internal constant ST_CLAIMED = 4;
+    uint8 internal constant ST_REBATED = 5;
 
     // Status bitmask per action: bit n set = status ordinal n qualifies.
     uint256 internal constant MASK_CAN_REGISTER = 0x05; // None (bit 0) or Cancelled (bit 2)
@@ -75,6 +79,9 @@ contract LifecycleHandler is Test {
     uint256 public claimMismatchCount;
     uint256 public lastClaimExpected;
     uint256 public lastClaimActual;
+    uint256 public rebateMismatchCount;
+    uint256 public lastRebateExpected;
+    uint256 public lastRebateActual;
 
     // Per-action attempted / succeeded counters, indexed by Act. Pure
     // visibility ghosts: the invariants assert nothing about them (campaign
@@ -89,11 +96,12 @@ contract LifecycleHandler is Test {
         CancelEvent,
         WarpForward,
         WarpToNextPhase,
-        ForceEth
+        ForceEth,
+        ClaimRebate
     }
 
-    uint256[10] public attempted;
-    uint256[10] public succeeded;
+    uint256[11] public attempted;
+    uint256[11] public succeeded;
 
     constructor(
         IKodyl _k,
@@ -170,7 +178,22 @@ contract LifecycleHandler is Test {
 
     function _dustOpen(uint256 i) internal view returns (bool) {
         if (_phase(i) != 3 || inPer[i] <= outPer[i]) return false;
-        return ghostClm[i] == ghostChk[i] || vm.getBlockTimestamp() > endOf[i] + disputeOf[i] + DUST_TIMEOUT;
+        // The early all-claimed door is shut while a rebate pool exists (no
+        // rebated-count on-chain); only the timeout opens the sweep then.
+        return (ghostClm[i] == ghostChk[i] && _ghostRebate(i) == 0)
+            || vm.getBlockTimestamp() > endOf[i] + disputeOf[i] + DUST_TIMEOUT;
+    }
+
+    // The contract's per-no-show rebate from GHOST counts: the forfeitures
+    // above the claimants' capped total, split across the no-shows.
+    function _ghostRebate(uint256 i) internal view returns (uint256) {
+        if (ghostChk[i] == 0 || ghostReg[i] <= ghostChk[i]) return 0;
+        uint256 dep = deposits[i];
+        uint256 noShow = ghostReg[i] - ghostChk[i];
+        uint256 forfeited = noShow * dep;
+        uint256 capTotal = ghostChk[i] * dep;
+        if (forfeited <= capTotal) return 0;
+        return (forfeited - capTotal) / noShow;
     }
 
     // The first LAZY_CLAIMERS actors never claim through the targeted path:
@@ -355,15 +378,51 @@ contract LifecycleHandler is Test {
             ghostStatus[i][a] = ST_CLAIMED;
             ghostClm[i]++;
             // Distribution check: the claimant (a plain EOA, so the delta is
-            // exact) must receive deposit + floor(noShow * deposit / checkedIn)
-            // computed from the GHOST counts, not the contract's.
+            // exact) must receive deposit + min(floor(noShow * deposit /
+            // checkedIn), deposit) - the capped reward - computed from the
+            // GHOST counts, not the contract's.
             bool modelOk = ghostChk[i] > 0 && ghostReg[i] >= ghostChk[i];
-            uint256 expect = modelOk ? dep + ((ghostReg[i] - ghostChk[i]) * dep) / ghostChk[i] : 0;
+            uint256 uncapped = modelOk ? ((ghostReg[i] - ghostChk[i]) * dep) / ghostChk[i] : 0;
+            uint256 expect = modelOk ? dep + (uncapped > dep ? dep : uncapped) : 0;
             uint256 actual = a.balance - beforeA;
             if (!modelOk || actual != expect) {
                 claimMismatchCount++;
                 lastClaimExpected = expect;
                 lastClaimActual = actual;
+            }
+        } catch {}
+        _out(i, beforeK);
+    }
+
+    function claimRebate(uint256 seed) public {
+        uint256 calls;
+        for (uint256 c = 0; c < eids.length; ++c) {
+            if (!_claimOpen(c) || _ghostRebate(c) == 0) continue;
+            (address a, bool ok) = _actorWith(c, MASK_REGISTERED, seed >> 8);
+            if (!ok) continue; // no still-registered no-show here
+            _attempt(Act.ClaimRebate);
+            _tryClaimRebate(c, a);
+            calls++;
+        }
+        if (calls == 0) {
+            _attempt(Act.ClaimRebate);
+            _tryClaimRebate(seed % eids.length, actors[(seed >> 8) % actors.length]);
+        }
+    }
+
+    function _tryClaimRebate(uint256 i, address a) internal {
+        uint256 beforeK = address(k).balance;
+        uint256 beforeA = a.balance;
+        uint256 expect = _ghostRebate(i);
+        vm.prank(a);
+        try k.claimNoShowRebate(eids[i]) {
+            _success(Act.ClaimRebate);
+            ghostStatus[i][a] = ST_REBATED;
+            uint256 actual = a.balance - beforeA;
+            if (expect == 0 || actual != expect) {
+                rebateMismatchCount++;
+                lastRebateExpected = expect;
+                lastRebateActual = actual;
             }
         } catch {}
         _out(i, beforeK);
@@ -526,12 +585,18 @@ contract KodylConservationInvariant is Test {
         assertEq(handler.claimMismatchCount(), 0, "claim payout != ghost-model payout");
     }
 
+    /// Same discipline for the reward cap's no-show rebate: every successful
+    /// claimNoShowRebate must pay exactly the ghost-model per-no-show excess.
+    function invariant_rebatePayoutsExact() public view {
+        assertEq(handler.rebateMismatchCount(), 0, "rebate payout != ghost-model rebate");
+    }
+
     /// Not an assertion - campaign composition varies, so nothing is required
     /// of these counts. Logged (visible with -vv) so path starvation stays
     /// measurable. Foundry restores the setUp snapshot between runs, so these
     /// are the counts of the campaign's final run of `depth` calls.
     function afterInvariant() public view {
-        string[10] memory names = [
+        string[11] memory names = [
             "register",
             "cancel",
             "claimRefund",
@@ -541,7 +606,8 @@ contract KodylConservationInvariant is Test {
             "cancelEvent",
             "warpForward",
             "warpToNextPhase",
-            "forceEth"
+            "forceEth",
+            "claimRebate"
         ];
         for (uint256 i = 0; i < names.length; ++i) {
             console2.log(string.concat(names[i], " attempted/succeeded:"), handler.attempted(i), handler.succeeded(i));

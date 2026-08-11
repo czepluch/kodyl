@@ -18,6 +18,7 @@ interface KodylAbi {
     event CheckedIn(uint256 indexed eventId, address indexed attendee);
     event Claimed(uint256 indexed eventId, address indexed attendee, uint256 amount);
     event RefundClaimed(uint256 indexed eventId, address indexed attendee, uint256 amount);
+    event RebateClaimed(uint256 indexed eventId, address indexed attendee, uint256 amount);
     event EventCancelled(uint256 indexed eventId);
     event MetadataUpdated(uint256 indexed eventId, string newURI);
     event DustClaimed(uint256 indexed eventId, address indexed recipient, uint256 amount);
@@ -42,6 +43,9 @@ interface KodylAbi {
     error NotAuthorized();
     error DustNotClaimable();
     error PayoutSwept();
+    /// @dev claimNoShowRebate when the reward cap is not binding (no excess
+    ///      to rebate), or on a zero-check-in event (claimRefund instead).
+    error NothingToRebate();
     error InvalidEventParameters(string reason);
     /// @dev Ticket signature does not recover to the claimed attendee.
     error TicketSignerMismatch();
@@ -100,6 +104,9 @@ interface KodylAbi {
     function cancel(uint256 eid) external;
     function claimRefund(uint256 eid) external;
     function claim(uint256 eid) external;
+    /// @dev No-show's pull-claim for the reward cap's excess (status must be
+    ///      Registered at Settled; flips to terminal Rebated).
+    function claimNoShowRebate(uint256 eid) external;
     function checkIn(uint256 eid, address attendee) external;
     /// @dev Fallback-dispatched in the contract, but a standard call from a client.
     function checkInBatch(uint256 eid, address[] calldata attendees) external;
@@ -162,7 +169,11 @@ interface KodylAbi {
     ///      during Dispute change it (each one converts a no-show forfeiture
     ///      into a claimant). Final only at state Settled.
     function rewardPerAttendee(uint256 eid) external view returns (uint256);
+    /// @dev Per-no-show rebate under the reward cap; 0 when the cap is not
+    ///      binding. Record-backed: unknown ids revert EventNotFound.
+    function noShowRebate(uint256 eid) external view returns (uint256);
     function MAX_BATCH_SIZE() external view returns (uint256);
     function DUST_CLAIM_TIMEOUT() external view returns (uint256);
     function MIN_CANCELLATION_BUFFER() external view returns (uint256);
+    function REWARD_CAP_MULTIPLE() external view returns (uint256);
 }

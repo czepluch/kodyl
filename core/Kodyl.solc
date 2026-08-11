@@ -32,7 +32,7 @@ data State = Registration | Active | Dispute | Settled | Cancelled;
 
 // Stored per (event, attendee). None is declared first so an unset mapping
 // key (the all-zero slot pattern) reads back as None.
-data AttendeeStatus = None | Registered | Cancelled | CheckedIn | Claimed;
+data AttendeeStatus = None | Registered | Cancelled | CheckedIn | Claimed | Rebated;
 
 // An event: either absent, or its immutable parameters. NoEvent is first so
 // an unset id reads back as NoEvent, and exhaustive matching forces every
@@ -69,6 +69,7 @@ function statusOrd(s : AttendeeStatus) -> uint256 {
     | AttendeeStatus.Cancelled  => return 2;
     | AttendeeStatus.CheckedIn  => return 3;
     | AttendeeStatus.Claimed    => return 4;
+    | AttendeeStatus.Rebated    => return 5;
     }
 }
 
@@ -112,6 +113,10 @@ function registerGuard(st : AttendeeStatus) -> () {
         revertWith2("InvalidAttendeeStatus(uint8,uint8)", 3, 0);
     | AttendeeStatus.Claimed =>
         revertWith2("InvalidAttendeeStatus(uint8,uint8)", 4, 0);
+    | AttendeeStatus.Rebated =>
+        // Unreachable in practice (Rebated only exists at Settled, where
+        // registration is closed), but the exhaustive match names it anyway.
+        revertWith2("InvalidAttendeeStatus(uint8,uint8)", 5, 0);
     }
 }
 
@@ -315,13 +320,45 @@ contract Kodyl {
         }
     }
 
-    // Pro-rata share of forfeited no-show deposits per checked-in attendee.
-    // Takes the tallies as arguments: callers already hold a Counters binding
-    // and must not re-read the mapping.
+    // The per-no-show rebate under the reward cap (0 when the cap is not
+    // binding). Record-backed like rewardPerAttendee: unknown ids revert.
+    public function noShowRebate(eid : uint256) -> uint256 {
+        match eventsRec[eid] {
+        | EventRec.NoEvent => revertNotFound(); return 0;
+        | EventRec.Ev(org, dep, deadline, start, end_, dispute, cap) =>
+            match countersM[eid] {
+            | Counters(reg, chk, clm, hld) => return calcRebate(reg, chk, dep);
+            }
+        }
+    }
+
+    // Pro-rata share of forfeited no-show deposits per checked-in attendee,
+    // capped at rewardCapMultiple() * deposit: attendance is a bounded bonus,
+    // not a lottery, so a checked-in sybil can extract at most the cap however
+    // many honest registrations it farms. Takes the tallies as arguments:
+    // callers already hold a Counters binding and must not re-read the mapping.
     function calcReward(reg : uint256, chk : uint256, dep : uint256) -> uint256 {
         if (chk == 0) { return 0; }
         let noShow = subCk(reg, chk);
-        return mulCk(noShow, dep) / chk;
+        let uncapped = mulCk(noShow, dep) / chk;
+        let capped = mulCk(rewardCapMultiple(), dep);
+        if (uncapped > capped) { return capped; }
+        return uncapped;
+    }
+
+    // Per-no-show rebate: the forfeitures the cap keeps away from claimants,
+    // split pro-rata across the no-shows. Nonzero only when the forfeiture
+    // pool exceeds the claimants' capped total - the regime a fake event or
+    // a mass no-show produces. Zero check-ins is abandonment (claimRefund
+    // pays in full), never a rebate.
+    function calcRebate(reg : uint256, chk : uint256, dep : uint256) -> uint256 {
+        if (chk == 0) { return 0; }
+        let noShow = subCk(reg, chk);
+        if (noShow == 0) { return 0; }
+        let forfeited = mulCk(noShow, dep);
+        let capTotal = mulCk(chk, mulCk(rewardCapMultiple(), dep));
+        if (forfeited <= capTotal) { return 0; }
+        return subCk(forfeited, capTotal) / noShow;
     }
 
     // Public constant getters: forward to the lib.kodyl nullary functions,
@@ -329,6 +366,7 @@ contract Kodyl {
     public function MAX_BATCH_SIZE() -> uint256 { return maxBatchSize(); }
     public function DUST_CLAIM_TIMEOUT() -> uint256 { return dustClaimTimeout(); }
     public function MIN_CANCELLATION_BUFFER() -> uint256 { return minCancellationBuffer(); }
+    public function REWARD_CAP_MULTIPLE() -> uint256 { return rewardCapMultiple(); }
 
     // --- attendee flow ---
 
@@ -443,6 +481,39 @@ contract Kodyl {
 
                 emitLog3W1(keccakLit("Claimed(uint256,address,uint256)"),
                            Typedef.rep(eid), Typedef.rep(caller()), Typedef.rep(payout));
+            }
+        }
+    }
+
+    // A no-show's pull-claim for the capped-off excess (see calcRebate).
+    // Registered-but-not-checked-in only, at Settled, and only when the cap
+    // is binding - the terminal Rebated status prevents double claims and
+    // deliberately does NOT touch registeredCount, so reward and rebate math
+    // stay frozen for every later claimant. PayoutSwept mirrors claim: after
+    // the timeout sweep the pot is gone and the late rebate says so plainly.
+    public function claimNoShowRebate(eid : uint256) -> () {
+        match eventsRec[eid] {
+        | EventRec.NoEvent => revertNotFound();
+        | EventRec.Ev(org, dep, deadline, start, end_, dispute, cap) =>
+            requireK(stateOrd(deriveState(cancelledM[eid], start, end_, dispute)) == 3,
+                     "NotSettled()");
+            match countersM[eid] {
+            | Counters(reg, chk, clm, hld) =>
+                let per = calcRebate(reg, chk, dep);
+                requireK(per != 0, "NothingToRebate()");
+                requireStatus(statusM[eid][caller()], 1);
+                requireK(per <= hld, "PayoutSwept()");
+
+                statusM[eid][caller()] = AttendeeStatus.Rebated;
+                countersM[eid] = Counters(reg, chk, clm, subCk(hld, per));
+                totalHeld = subCk(totalHeld, per);
+
+                sendValue(caller(), per);
+
+                solAssert(balanceSelf() >= totalHeld);
+
+                emitLog3W1(keccakLit("RebateClaimed(uint256,address,uint256)"),
+                           Typedef.rep(eid), Typedef.rep(caller()), Typedef.rep(per));
             }
         }
     }
@@ -632,7 +703,12 @@ contract Kodyl {
                 // cancelled events. Without this gate the vacuous 0 == 0
                 // "all claimed" would let the maintainer race the refunds.
                 requireK(chk != 0, "DustNotClaimable()");
-                let allClaimed = clm == chk;
+                // When the reward cap leaves a rebate pool, the early
+                // "all claimed" door stays shut - there is no rebated-count
+                // tally, so before the timeout the pot may still owe
+                // no-shows their rebates. The 30-day sweep then takes
+                // whatever rebates went unclaimed, like unclaimed payouts.
+                let allClaimed = clm == chk && calcRebate(reg, chk, dep) == 0;
                 let timeoutPassed = timeNow() > addCk(addCk(end_, dispute), dustClaimTimeout());
                 if (!allClaimed && !timeoutPassed) {
                     fail("DustNotClaimable()");

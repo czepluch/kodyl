@@ -4,7 +4,8 @@
 
 Kodyl implemented in **Core Solidity** (`.solc`, the solcore research language).
 Event-deposit protocol: stake to register, checked-in attendees reclaim their
-deposit plus a pro-rata share of no-show forfeitures, dust to a maintainer. See
+deposit plus a pro-rata share of no-show forfeitures (capped at one deposit;
+the excess rebates to no-shows via claimNoShowRebate), dust to a maintainer. See
 `spec.md` for the concept and `core/README.md` for the design + deviations.
 There is **no classic-Solidity version** in this repo, and we don't
 want one - the point is the Core Solidity implementation.

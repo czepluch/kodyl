@@ -43,7 +43,7 @@ export function Discover() {
 
 // --- Event page: full detail + roster from logs ---
 
-const ROSTER_ORDER = ['Registered', 'Checked in', 'Claimed', 'Refunded', 'Cancelled']
+const ROSTER_ORDER = ['Registered', 'Checked in', 'Claimed', 'Rebated', 'Refunded', 'Cancelled']
 
 export function EventPage({ id }: { id: bigint }) {
   const { events, session, now } = useApp()
@@ -152,12 +152,14 @@ export function MyTickets() {
   const mine = events.filter((e) => e.myStatus !== STATUS.None)
   const upcoming = mine.filter((e) => e.state < STATE.Settled && !e.cancelled)
   // A swept payout is no longer claimable - it must not read as "Action needed".
-  // Refunds count as action: cancelled events and abandoned ones (settled
-  // with zero check-ins) both leave a still-registered attendee owed money.
+  // Refunds and rebates count as action: cancelled and abandoned events owe a
+  // still-registered attendee their deposit back; a capped settlement owes a
+  // no-show their rebate.
   const toClaim = mine.filter(
     (e) =>
       (e.state === STATE.Settled && e.myStatus === STATUS.CheckedIn && !payoutSwept(e)) ||
-      ((e.cancelled || (e.state === STATE.Settled && e.checkedInCount === 0n)) && e.myStatus === STATUS.Registered),
+      ((e.cancelled || (e.state === STATE.Settled && e.checkedInCount === 0n)) && e.myStatus === STATUS.Registered) ||
+      (e.state === STATE.Settled && e.myStatus === STATUS.Registered && e.rebate > 0n),
   )
   const past = mine.filter((e) => !upcoming.includes(e) && !toClaim.includes(e))
 

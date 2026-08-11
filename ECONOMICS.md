@@ -13,15 +13,17 @@ the forfeiture pot flows, so attendees trust the organizer (and every
 appointed operator) with their stake, not merely with attendance bookkeeping.
 
 The economic fact that shapes every mitigation: **the sybil check-in attack is
-nearly free.** A sybil's own deposit round-trips at claim - register, get
-checked in, claim it back plus the reward - so capturing honest deposits costs
-only gas (`testFuzz_econ_sybilProfitExact` pins the stake-never-at-risk
+nearly free to mount.** A sybil's own deposit round-trips at claim - register,
+get checked in, claim it back plus the reward - so the attempt costs only gas
+(`testFuzz_econ_sybilProfitCappedAtOneDeposit` pins the stake-never-at-risk
 property for fuzzed turnouts and deposit sizes). Any countermeasure that
 merely demands more checked-in participants (quorums, minimum ratios) fails:
-sybils satisfy it at no marginal cost. The real levers are:
+sybils satisfy it at no marginal cost. That is why the landed defense caps
+the prize instead of taxing the attempt. The real levers are:
 
 1. **Cap the prize** - bound what one checked-in address can extract
-   (candidate C1 in `ECONOMICS-PLAN.md`).
+   (LANDED as the reward cap: `REWARD_CAP_MULTIPLE` = 1 deposit, excess
+   rebated to no-shows).
 2. **Make identity costly** - ZK attendance, attestation registries (out of
    scope, see spec's future list).
 3. **Make reputation legible** - the attacks below have loud on-chain
@@ -43,21 +45,26 @@ attack row below is a deviation from this.
 
 ## Attacks
 
-### 1. Sybil capture (organizer)
+### 1. Sybil capture (organizer) - BOUNDED by C1
 
-Register a sock puppet, check in only it. With 10 honest registrations at
-deposit d, the sybil claims 11d: profit exactly 10d, every honest attendee
--d, and the sybil's own stake never at risk
-(`test_econ_sybilCapturesWholePot`; profit is `nHonest * d` for any turnout,
-`testFuzz_econ_sybilProfitExact`).
+Register a sock puppet, check in only it: the fake-event scam's payday.
+Before the cap this took the whole pot (`nHonest * d` profit). Now the reward
+caps at one deposit, so with 10 honest registrations the sybil claims 2d -
+profit exactly d - and the capped-off 9d rebates to the victims, who each
+recover 90 percent (`test_econ_sybilCaptureBoundedToOneDeposit`). The bound
+is turnout-independent: profit is exactly one deposit for ANY victim count
+and deposit size, and aggregate victim loss equals it
+(`testFuzz_econ_sybilProfitCappedAtOneDeposit`).
 
-- **Cost**: gas only (appendix: register + checkIn + claim, about 198k in-EVM
-  across three transactions).
+- **Cost**: gas only, but the REAL cost was never gas - it is credibly
+  marketing a fake event. At one deposit of revenue per fake event, the scam
+  does not scale and does not pay.
 - **Footprint**: `registeredCount 11 / checkedInCount 1 / claimedCount 1` -
-  the loud red-flag ratio - plus a payout to an address with no history.
-- **Today**: not prevented; reputational deterrence only.
-- **Changed by**: C1 (profit drops from `n*d` to the cap), C3 (footprint
-  becomes visible at registration time).
+  the loud red-flag ratio - plus a payout to an address with no history, and
+  now a trail of RebateClaimed logs.
+- **Residual**: one deposit per event, and the attestation power itself
+  (attack 3's exclusion remains free). C3 makes the footprint visible at
+  registration time.
 
 ### 2. Sybil skim (organizer)
 
@@ -73,9 +80,8 @@ counterfactual on a second event: 0.5 ETH per claimant instead of 0.75;
 - **Footprint**: much quieter than capture - the checked-in ratio looks
   plausible; the tell is claimants with no cross-event history.
 - **Today**: not prevented, and hard for a victim to notice (they still got
-  a bonus).
-- **Changed by**: C1 only in extreme regimes (the skim usually stays under
-  any sane cap); C3 is the real counter.
+  a bonus). The cap rarely touches it: a plausible-looking skim stays under
+  one deposit per claimant by construction. C3 is the real counter.
 
 ### 3. Exclusion griefing (organizer)
 
@@ -112,20 +118,19 @@ settlement (`test_claimRefund_abandonmentClosedByLateCheckIn`,
 - **Residual**: a fake event that wants profit must check in a sybil, which
   is attack 1 - louder on-chain and bounded by C1 once that lands.
 
-### 5. Operator collusion
+### 5. Operator collusion - BOUNDED by C1
 
-An appointed operator's `Presence` signature reproduces attack 1 exactly: 3
-honest deposits captured through an operator-signed proof, profit 3d, and
-neither the operator nor the organizer moves ETH on-chain (the split is
-off-chain) (`test_econ_operatorCollusionEqualsOrganizer`). Appointing an
-operator IS sharing the custody surface - the payoffs are identical.
+An appointed operator's `Presence` signature reproduces attack 1 exactly,
+cap included: an operator-attested sybil claims 2d against 3 honest
+registrations (profit d), the victims claim their rebates, and neither the
+operator nor the organizer moves ETH on-chain (the split is off-chain)
+(`test_econ_operatorCollusionEqualsOrganizer`). Appointing an operator IS
+sharing the custody surface - the payoffs are identical, bound included.
 
 - **Cost**: gas only (appendix: setOperator + checkInWithProof).
 - **Footprint**: as attack 1, plus the `OperatorSet` log naming the operator.
-- **Today**: auditable (`isOperator`, `OperatorSet`) and revocable
-  (`setOperator`), but while authorized the attestation carries full weight.
-- **Changed by**: C1, C3 (an operator's cross-event appointment history is a
-  usable signal).
+- **Residual**: as attack 1. C3 can use an operator's cross-event appointment
+  history as a signal.
 
 ### 6. Maintainer-as-organizer self-capture - DEFUSED by C2
 
@@ -178,11 +183,11 @@ cannot cancel (`test_econ_capacityGriefingCostsOnlyLockup`).
 
 | # | Attack | Attacker profit | Attacker cost | On-chain visibility | Status |
 |---|--------|----------------|---------------|--------------------|--------|
-| 1 | Sybil capture | `nHonest * d` | gas | loud (1-of-n check-in ratio) | not prevented |
-| 2 | Sybil skim | `s * floor(m*d/(c+s))` | gas | quiet (plausible ratios) | not prevented |
+| 1 | Sybil capture | exactly `d` (was `nHonest * d`) | gas + fake-event marketing | loud (1-of-n ratio + rebate trail) | bounded (C1) |
+| 2 | Sybil skim | `s * min(floor(m*d/(c+s)), d)` | gas | quiet (plausible ratios) | not prevented |
 | 3 | Exclusion griefing | 0 (harm without profit) | zero | invisible | no recourse |
 | 4 | Abandonment | 0 - full refunds | zero | unambiguous | defused (C2) |
-| 5 | Operator collusion | as attack 1 | gas | as 1 + OperatorSet log | not prevented |
+| 5 | Operator collusion | as attack 1 | gas | as 1 + OperatorSet log | bounded (C1) |
 | 6 | Maintainer self-capture | 0 - full refunds | zero | checkedInCount 0 | defused (C2) |
 | 7 | Sweep of unclaimed payouts | n/a (protocol rule) | n/a | DustClaimed after timeout | documented |
 | 8 | Capacity griefing | 0 (denial only) | lockup + gas | mass register/cancel | tolerated |
@@ -217,7 +222,10 @@ and land one commit at a time, each with its new `test_econ_*` payoff rows
 and an update to this document:
 
 - **C2 zero-check-in refunds: LANDED** (attacks 4 and 6 defused above).
-- **C1 reward cap** (k = 1 protocol constant, excess rebated to no-shows):
-  accepted, next up - bounds attacks 1 and 5 to one deposit per event.
-- **C3 reputation surface** (frontend): accepted.
+- **C1 reward cap: LANDED** (`REWARD_CAP_MULTIPLE` = 1, excess rebated to
+  no-shows via `claimNoShowRebate` - attacks 1 and 5 bounded to one deposit
+  of profit per event). The accepted trade: no-shows receive partial mercy in
+  extreme-forfeiture events, softening the forfeiture threat exactly where
+  force majeure is likeliest.
+- **C3 reputation surface** (frontend): accepted, next up.
 - **C4 organizer stake**: deprioritized until an adjudication design exists.

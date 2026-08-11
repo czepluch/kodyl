@@ -44,6 +44,19 @@
   },
   {
     "type": "function",
+    "name": "REWARD_CAP_MULTIPLE",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
     "name": "attendees",
     "inputs": [
       {
@@ -238,6 +251,19 @@
   {
     "type": "function",
     "name": "claimDust",
+    "inputs": [
+      {
+        "name": "eid",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "outputs": [],
+    "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
+    "name": "claimNoShowRebate",
     "inputs": [
       {
         "name": "eid",
@@ -481,6 +507,25 @@
         "name": "",
         "type": "string",
         "internalType": "string"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "noShowRebate",
+    "inputs": [
+      {
+        "name": "eid",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint256",
+        "internalType": "uint256"
       }
     ],
     "stateMutability": "view"
@@ -806,6 +851,31 @@
   },
   {
     "type": "event",
+    "name": "RebateClaimed",
+    "inputs": [
+      {
+        "name": "eventId",
+        "type": "uint256",
+        "indexed": true,
+        "internalType": "uint256"
+      },
+      {
+        "name": "attendee",
+        "type": "address",
+        "indexed": true,
+        "internalType": "address"
+      },
+      {
+        "name": "amount",
+        "type": "uint256",
+        "indexed": false,
+        "internalType": "uint256"
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
     "name": "RefundClaimed",
     "inputs": [
       {
@@ -1019,6 +1089,11 @@
   {
     "type": "error",
     "name": "NotSettled",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "NothingToRebate",
     "inputs": []
   },
   {
