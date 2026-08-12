@@ -7,7 +7,7 @@ import { type RosterEntry, getRoster } from './logs'
 import { encodeMetadata, useMetadata } from './metadata'
 import { to } from './router'
 import { fmtDuration, fmtEth, fmtTime, shortAddr, toLocalInput } from './format'
-import { CheckInBanner, EventActions, EventCard, JumpButton, OperatorsPanel, StateBadge, isOrganizer, nextPhaseTs, payoutSwept } from './components'
+import { CheckInBanner, EventActions, EventCard, JumpButton, OperatorsPanel, OrganizerRecordLine, StateBadge, isOrganizer, nextPhaseTs, payoutSwept } from './components'
 
 const DAY = 86400
 const MIN_START_AHEAD = 3 * 3600
@@ -110,6 +110,8 @@ export function EventPage({ id }: { id: bigint }) {
         <div><span>Cancel by</span><b>{fmtTime(ev.cancellationDeadline)}</b></div>
         <div><span>Your status</span><b>{STATUS_LABELS[ev.myStatus] ?? '?'}</b></div>
       </div>
+
+      <OrganizerRecordLine ev={ev} />
 
       <EventActions ev={ev} roster={roster} />
 

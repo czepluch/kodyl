@@ -11,6 +11,7 @@ import { DOMAIN, PRESENCE_TYPES, TICKET_TYPES } from './eip712'
 import { type TicketVoucher, type Voucher, addToOutbox, loadTicket, outboxFor, removeFromOutbox, saveTicket } from './outbox'
 import { fetchVoucher, postVoucher } from './mailbox'
 import { QrCode, QrScanner } from './qr'
+import { organizerRecord } from './reputation'
 import { DUST_CLAIM_TIMEOUT, fmtDuration, fmtEth, fmtTime, shortAddr } from './format'
 
 const DAY = 86400
@@ -772,6 +773,52 @@ export function OperatorsPanel({ ev }: { ev: EventView }) {
   )
 }
 
+// --- organizer track record (C3: capture footprints, legible before paying) ---
+
+// Quiet by default; warn-colored where a settled event carries an attack
+// footprint (single claimer among many registrants, zero check-ins, low
+// turnout - see ECONOMICS.md). Compact mode (cards) carries only the
+// first-event warning: the full record lives on the event page.
+export function OrganizerRecordLine({ ev, compact }: { ev: EventView; compact?: boolean }) {
+  const { events, session } = useApp()
+  const rec = organizerRecord(events, ev.organizer, ev.id)
+  if (rec.total === 0) return null // list still loading
+
+  if (rec.firstEvent) {
+    // Only worth saying while the deposit decision is still ahead, and not
+    // to the organizer themselves.
+    if (ev.state !== STATE.Registration || ev.cancelled || isOrganizer(ev, session.address)) return null
+    return (
+      <p className="rep">
+        <span className="flag">First event from this organizer.</span> Check-in decides where deposits go,
+        so until you are checked in your stake rides on their honesty - there is no track record yet.
+      </p>
+    )
+  }
+  if (compact) return null
+
+  const bits: { text: string; flag: boolean }[] = [
+    { text: `${rec.total} events`, flag: false },
+  ]
+  if (rec.settledClean > 0) bits.push({ text: `${rec.settledClean} settled cleanly`, flag: false })
+  if (rec.cancelled > 0) bits.push({ text: `${rec.cancelled} cancelled`, flag: false })
+  if (rec.singleClaimer > 0)
+    bits.push({ text: `${rec.singleClaimer} settled with a single claimant`, flag: true })
+  if (rec.abandoned > 0) bits.push({ text: `${rec.abandoned} abandoned (zero check-ins)`, flag: true })
+  if (rec.lowTurnout > 0) bits.push({ text: `${rec.lowTurnout} with under half checked in`, flag: true })
+  return (
+    <p className="rep">
+      Organizer track record:{' '}
+      {bits.map((b, i) => (
+        <span key={b.text} className={b.flag ? 'flag' : undefined}>
+          {i > 0 && ' · '}
+          {b.text}
+        </span>
+      ))}
+    </p>
+  )
+}
+
 // --- event card (used in Discover / My tickets / Organize) ---
 
 export function EventCard({ ev }: { ev: EventView }) {
@@ -796,6 +843,7 @@ export function EventCard({ ev }: { ev: EventView }) {
         <div><span>Starts</span><b>{fmtTime(ev.eventStart)}</b></div>
         <div><span>Your status</span><b>{STATUS_LABELS[ev.myStatus] ?? '?'}{organizer ? ' · organizer' : ''}</b></div>
       </div>
+      <OrganizerRecordLine ev={ev} compact />
       <EventActions ev={ev} />
       <a className="detail-link" href={to(`/event/${ev.id}`)}>Details &amp; attendees &rarr;</a>
     </div>

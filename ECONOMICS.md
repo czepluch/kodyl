@@ -27,7 +27,8 @@ the prize instead of taxing the attempt. The real levers are:
 2. **Make identity costly** - ZK attendance, attestation registries (out of
    scope, see spec's future list).
 3. **Make reputation legible** - the attacks below have loud on-chain
-   footprints; surface them at registration time (candidate C3).
+   footprints (LANDED as the frontend's organizer track record: a first-event
+   warning and warn-flagged settlement footprints, shown before registration).
 
 One naming honesty note: the **dispute period grants attendees no dispute
 mechanism**. It is a grace window for the organizer's late check-ins. The
@@ -63,8 +64,8 @@ and deposit size, and aggregate victim loss equals it
   the loud red-flag ratio - plus a payout to an address with no history, and
   now a trail of RebateClaimed logs.
 - **Residual**: one deposit per event, and the attestation power itself
-  (attack 3's exclusion remains free). C3 makes the footprint visible at
-  registration time.
+  (attack 3's exclusion remains free). The organizer track record (C3,
+  landed) shows the footprint at registration time.
 
 ### 2. Sybil skim (organizer)
 
@@ -81,7 +82,9 @@ counterfactual on a second event: 0.5 ETH per claimant instead of 0.75;
   plausible; the tell is claimants with no cross-event history.
 - **Today**: not prevented, and hard for a victim to notice (they still got
   a bonus). The cap rarely touches it: a plausible-looking skim stays under
-  one deposit per claimant by construction. C3 is the real counter.
+  one deposit per claimant by construction. The organizer track record (C3,
+  landed) is the real counter: low-turnout and single-claimant settlements
+  follow the organizer to their next event.
 
 ### 3. Exclusion griefing (organizer)
 
@@ -129,8 +132,8 @@ sharing the custody surface - the payoffs are identical, bound included.
 
 - **Cost**: gas only (appendix: setOperator + checkInWithProof).
 - **Footprint**: as attack 1, plus the `OperatorSet` log naming the operator.
-- **Residual**: as attack 1. C3 can use an operator's cross-event appointment
-  history as a signal.
+- **Residual**: as attack 1. The landed track record covers the organizer;
+  an operator's cross-event appointment history is a possible future signal.
 
 ### 6. Maintainer-as-organizer self-capture - DEFUSED by C2
 
@@ -227,5 +230,10 @@ and an update to this document:
   of profit per event). The accepted trade: no-shows receive partial mercy in
   extreme-forfeiture events, softening the forfeiture threat exactly where
   force majeure is likeliest.
-- **C3 reputation surface** (frontend): accepted, next up.
+- **C3 reputation surface: LANDED** (frontend `reputation.ts` +
+  `OrganizerRecordLine`): a first-event warning on cards and the event page
+  while registration is open, and a per-organizer record with warn-flagged
+  counts of the footprints this document pins - single-claimant settlements,
+  zero-check-in abandonments, low-turnout settlements. Detection, not
+  prevention; registration is never blocked.
 - **C4 organizer stake**: deprioritized until an adjudication design exists.

@@ -105,6 +105,11 @@ main h2, .section h2 { font-size: 17px; margin: 0 0 12px; }
 .grid span { color: var(--muted); font-size: 13px; }
 .grid b { font-size: 13px; }
 
+/* organizer track record (C3): quiet by default, warn where a settled event
+   carries an attack footprint */
+.rep { margin: 0 0 12px; font-size: 13px; color: var(--muted); }
+.rep .flag { color: var(--warn); }
+
 .actions { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
 .checkin { display: flex; gap: 6px; }
 .detail-link { display: inline-block; margin-top: 12px; font-size: 13px; }

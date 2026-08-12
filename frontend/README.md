@@ -35,6 +35,15 @@ also understands `http(s)` and `ipfs://`, so moving to real hosting later is a
 one-function change. Events created without structured metadata (e.g. the
 seed's `ipfs://...`) show the raw URI as their title.
 
+## Organizer track record
+
+Before you register, event cards and the event page show the organizer's
+history, derived from the already-loaded event list: a warning when this is
+their first event, and warn-flagged counts for settlement shapes matching the
+attack footprints in `ECONOMICS.md` (single-claimant settlements,
+zero-check-in abandonments, low turnout). Detection, not prevention -
+registration is never blocked.
+
 ## Demo controls
 
 The chain-clock fast-forward and the account impersonator live in a **Demo
@@ -116,6 +125,7 @@ click-path above is the manual half.
 | `qr.tsx` | QR generation (`qrcode`) and camera scanning (`jsqr`) |
 | `useKodyl.ts` | per-event state via a viem public client, block-watched |
 | `logs.ts` | roster + activity + operator set reconstructed from event logs |
+| `reputation.ts` | organizer track record derived from the event list (attack footprints, shown before registering) |
 | `metadata.ts` | `EventMeta`, `encodeMetadata`, `resolveMetadata` |
 | `router.ts` | tiny hash router |
 | `ctx.ts` | shared app context (data + tx runner) |
