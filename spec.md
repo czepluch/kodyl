@@ -553,7 +553,7 @@ verified against the bytecode by `test/KodylEcon.t.sol`.
 - [ ] Protocol fees
 - [ ] Privacy features (ZK proofs for attendance without revealing identity)
 - [ ] Pure self-check-in with no door attestation (rejected as too easy to share; the proof-based path keeps the human at the door via the operator's `Presence` signature)
-- [ ] EIP-1271 contract signers for `Presence` (a door operator that is a multisig - the natural v3; see `CHECKIN-PLAN.md`)
+- [ ] EIP-1271 contract signers for `Presence` (a door operator that is a multisig - the natural v3)
 - [ ] Reputation/history tracking across events
 - [ ] POAP integration (auto-distribute POAPs to checked-in attendees via POAP API)
 - [ ] Multi-sig organizer support

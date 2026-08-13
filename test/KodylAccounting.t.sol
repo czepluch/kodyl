@@ -237,11 +237,13 @@ contract KodylAccountingTest is Test {
             paidOut += who[i].balance;
         }
 
-        // The reward cap's rebate leg: when forfeitures exceed the claimants'
-        // capped total, each no-show pulls its pro-rata share of the excess.
+        // The reward cap's rebate leg: with cap multiple 1 the cap binds
+        // exactly when no-shows outnumber claimants (reward is then one
+        // deposit), and each no-show pulls its floor share of the excess -
+        // which can be zero at tiny deposits, leaving the excess as dust.
         uint256 noShow = nReg - nChk;
-        uint256 fairReward = (noShow * dep) / nChk > dep ? dep : (noShow * dep) / nChk;
-        uint256 rebatePer = noShow * dep > nChk * dep ? (noShow * dep - nChk * dep) / noShow : 0;
+        uint256 fairReward = noShow > nChk ? dep : (noShow * dep) / nChk;
+        uint256 rebatePer = noShow > nChk ? ((noShow - nChk) * dep) / noShow : 0;
         uint256 rebatesPaid;
         for (uint256 i = nChk; i < nReg && rebatePer > 0; ++i) {
             vm.prank(who[i]);
@@ -264,8 +266,8 @@ contract KodylAccountingTest is Test {
         assertEq(paidOut + rebatesPaid + dust, dep * nReg, "ETH not conserved for event");
         assertEq(k.held(eid), 0);
         assertEq(paidOut, nChk * (dep + fairReward), "reward math drift");
-        if (rebatePer > 0) {
-            assertEq(dust, (noShow * dep - nChk * dep) % noShow, "dust != rebate remainder");
+        if (noShow > nChk) {
+            assertEq(dust, (noShow - nChk) * dep - noShow * rebatePer, "dust != rebate remainder");
         } else {
             assertEq(dust, (noShow * dep) % nChk, "dust != remainder");
         }

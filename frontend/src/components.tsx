@@ -773,7 +773,7 @@ export function OperatorsPanel({ ev }: { ev: EventView }) {
   )
 }
 
-// --- organizer track record (C3: capture footprints, legible before paying) ---
+// --- organizer track record (capture footprints, legible before paying) ---
 
 // Quiet by default; warn-colored where a settled event carries an attack
 // footprint (single claimer among many registrants, zero check-ins, low

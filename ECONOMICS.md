@@ -46,7 +46,7 @@ attack row below is a deviation from this.
 
 ## Attacks
 
-### 1. Sybil capture (organizer) - BOUNDED by C1
+### 1. Sybil capture (organizer) - BOUNDED by the reward cap
 
 Register a sock puppet, check in only it: the fake-event scam's payday.
 Before the cap this took the whole pot (`nHonest * d` profit). Now the reward
@@ -57,15 +57,16 @@ is turnout-independent: profit is exactly one deposit for ANY victim count
 and deposit size, and aggregate victim loss equals it
 (`testFuzz_econ_sybilProfitCappedAtOneDeposit`).
 
-- **Cost**: gas only, but the REAL cost was never gas - it is credibly
-  marketing a fake event. At one deposit of revenue per fake event, the scam
-  does not scale and does not pay.
+- **Cost**: gas only (appendix: register + checkIn + claim, about 201k
+  in-EVM across three transactions), but the REAL cost was never gas - it is
+  credibly marketing a fake event. At one deposit of revenue per fake event,
+  the scam does not scale and does not pay.
 - **Footprint**: `registeredCount 11 / checkedInCount 1 / claimedCount 1` -
   the loud red-flag ratio - plus a payout to an address with no history, and
   now a trail of RebateClaimed logs.
 - **Residual**: one deposit per event, and the attestation power itself
-  (attack 3's exclusion remains free). The organizer track record (C3,
-  landed) shows the footprint at registration time.
+  (attack 3's exclusion remains free). The organizer track record shows the
+  footprint at registration time.
 
 ### 2. Sybil skim (organizer)
 
@@ -82,9 +83,9 @@ counterfactual on a second event: 0.5 ETH per claimant instead of 0.75;
   plausible; the tell is claimants with no cross-event history.
 - **Today**: not prevented, and hard for a victim to notice (they still got
   a bonus). The cap rarely touches it: a plausible-looking skim stays under
-  one deposit per claimant by construction. The organizer track record (C3,
-  landed) is the real counter: low-turnout and single-claimant settlements
-  follow the organizer to their next event.
+  one deposit per claimant by construction. The organizer track record is the
+  real counter: low-turnout and single-claimant settlements follow the
+  organizer to their next event.
 
 ### 3. Exclusion griefing (organizer)
 
@@ -100,12 +101,12 @@ becomes targeted capture (attack 1).
 - **Today**: no recourse; the dispute window helps only if the organizer
   cooperates.
 - **Changed by**: nothing on the table; this is the irreducible core of
-  attested check-in. C4's stake-plus-adjudication would be the counter, and
-  is blocked on an adjudication design.
+  attested check-in. An organizer stake with slashing would be the counter,
+  and is blocked on an adjudication design (see What landed).
 
-### 4. Abandonment (organizer) - DEFUSED by C2
+### 4. Abandonment (organizer) - DEFUSED by the abandonment rule
 
-Check in nobody. Before C2 landed, the vacuous all-claimed rule (0 == 0)
+Check in nobody. Before the rule landed, the vacuous all-claimed rule (0 == 0)
 made `claimDust` available immediately at settlement and the ENTIRE pot went
 to the maintainer. Now a zero-check-in settlement is abandonment: `claimDust`
 refuses it outright (even past the 30-day timeout - otherwise the maintainer
@@ -119,9 +120,9 @@ settlement (`test_claimRefund_abandonmentClosedByLateCheckIn`,
 - **Cost**: zero, and so is the take: abandonment now achieves nothing.
 - **Footprint**: `checkedInCount == 0` with a nonzero `registeredCount`.
 - **Residual**: a fake event that wants profit must check in a sybil, which
-  is attack 1 - louder on-chain and bounded by C1 once that lands.
+  is attack 1 - louder on-chain and bounded by the reward cap.
 
-### 5. Operator collusion - BOUNDED by C1
+### 5. Operator collusion - BOUNDED by the reward cap
 
 An appointed operator's `Presence` signature reproduces attack 1 exactly,
 cap included: an operator-attested sybil claims 2d against 3 honest
@@ -135,10 +136,10 @@ sharing the custody surface - the payoffs are identical, bound included.
 - **Residual**: as attack 1. The landed track record covers the organizer;
   an operator's cross-event appointment history is a possible future signal.
 
-### 6. Maintainer-as-organizer self-capture - DEFUSED by C2
+### 6. Maintainer-as-organizer self-capture - DEFUSED by the abandonment rule
 
 The maintainer address creates an event and abandons it (attack 4). Before
-C2 this was one-party capture of every deposit with no sybil needed; now the
+the rule this was one-party capture of every deposit with no sybil needed; now the
 sweep is refused, the pot refunds in full, and the self-capture nets exactly
 nothing (`test_econ_maintainerSelfCaptureDefeated`). The rational scammer's
 remaining move is a checked-in sybil - attack 1's economics and footprint.
@@ -186,12 +187,12 @@ cannot cancel (`test_econ_capacityGriefingCostsOnlyLockup`).
 
 | # | Attack | Attacker profit | Attacker cost | On-chain visibility | Status |
 |---|--------|----------------|---------------|--------------------|--------|
-| 1 | Sybil capture | exactly `d` (was `nHonest * d`) | gas + fake-event marketing | loud (1-of-n ratio + rebate trail) | bounded (C1) |
+| 1 | Sybil capture | exactly `d` (was `nHonest * d`) | gas + fake-event marketing | loud (1-of-n ratio + rebate trail) | bounded (reward cap) |
 | 2 | Sybil skim | `s * min(floor(m*d/(c+s)), d)` | gas | quiet (plausible ratios) | not prevented |
 | 3 | Exclusion griefing | 0 (harm without profit) | zero | invisible | no recourse |
-| 4 | Abandonment | 0 - full refunds | zero | unambiguous | defused (C2) |
-| 5 | Operator collusion | as attack 1 | gas | as 1 + OperatorSet log | bounded (C1) |
-| 6 | Maintainer self-capture | 0 - full refunds | zero | checkedInCount 0 | defused (C2) |
+| 4 | Abandonment | 0 - full refunds | zero | unambiguous | defused (refunds) |
+| 5 | Operator collusion | as attack 1 | gas | as 1 + OperatorSet log | bounded (reward cap) |
+| 6 | Maintainer self-capture | 0 - full refunds | zero | checkedInCount 0 | defused (refunds) |
 | 7 | Sweep of unclaimed payouts | n/a (protocol rule) | n/a | DustClaimed after timeout | documented |
 | 8 | Capacity griefing | 0 (denial only) | lockup + gas | mass register/cancel | tolerated |
 
@@ -203,37 +204,43 @@ means no ETH at risk and no transaction required beyond doing nothing.
 In-EVM call gas measured with `gasleft()` deltas in a forge harness against
 the committed bytecode at toolchain pin `1fb1f880` (forge's `--gas-report`
 cannot attribute calls to a raw-hex deploy). Add ~21k intrinsic plus calldata
-gas per transaction for an on-chain cost. Measured 2026-08-05:
+gas per transaction for an on-chain cost. Measured 2026-08-13, with the
+reward cap and rebate in the bytecode:
 
 | Call | Gas (in-EVM) |
 |---|---|
-| `register` (11th registrant) | 39,930 |
-| `checkIn` (direct, single) | 74,247 |
-| `checkInWithProof` (operator-signed) | 85,057 |
-| `setOperator` (enable) | 29,646 |
-| `claim` | 84,059 |
-| `claimDust` (abandonment sweep) | 47,239 |
-| `cancel` (griefer exit) | 63,409 |
+| `register` (11th registrant) | 40,110 |
+| `checkIn` (direct, single) | 74,496 |
+| `checkInWithProof` (operator-signed) | 85,305 |
+| `setOperator` (enable) | 29,895 |
+| `claim` (capped reward) | 86,824 |
+| `claimNoShowRebate` (first rebate) | 131,069 |
+| `claimDust` (timeout sweep) | 48,140 |
+| `cancel` (griefer exit) | 63,579 |
 
 At any plausible gas price these are noise next to a single 1 ETH deposit:
 the economics above are dominated entirely by the deposit flows.
 
-## What follows
+## What landed
 
-The candidate mechanism changes are specified in `ECONOMICS-PLAN.md` Track 2
-and land one commit at a time, each with its new `test_econ_*` payoff rows
-and an update to this document:
+The mechanism changes this matrix motivated landed one commit at a time,
+each with its new `test_econ_*` payoff rows and an update to this document:
 
-- **C2 zero-check-in refunds: LANDED** (attacks 4 and 6 defused above).
-- **C1 reward cap: LANDED** (`REWARD_CAP_MULTIPLE` = 1, excess rebated to
-  no-shows via `claimNoShowRebate` - attacks 1 and 5 bounded to one deposit
-  of profit per event). The accepted trade: no-shows receive partial mercy in
+- **Zero-check-in refunds** (the abandonment rule): attacks 4 and 6 defused
+  above.
+- **Reward cap** (`REWARD_CAP_MULTIPLE` = 1, excess rebated to no-shows via
+  `claimNoShowRebate`): attacks 1 and 5 bounded to one deposit of profit per
+  event. The accepted trade: no-shows receive partial mercy in
   extreme-forfeiture events, softening the forfeiture threat exactly where
   force majeure is likeliest.
-- **C3 reputation surface: LANDED** (frontend `reputation.ts` +
-  `OrganizerRecordLine`): a first-event warning on cards and the event page
-  while registration is open, and a per-organizer record with warn-flagged
-  counts of the footprints this document pins - single-claimant settlements,
-  zero-check-in abandonments, low-turnout settlements. Detection, not
-  prevention; registration is never blocked.
-- **C4 organizer stake**: deprioritized until an adjudication design exists.
+- **Reputation surface** (frontend `reputation.ts` + `OrganizerRecordLine`):
+  a first-event warning on cards and the event page while registration is
+  open, and a per-organizer record with warn-flagged counts of the footprints
+  this document pins - single-claimant settlements, zero-check-in
+  abandonments, low-turnout settlements. Detection, not prevention;
+  registration is never blocked.
+- **Organizer stake**: NOT built, deliberately. A stake only deters if it can
+  be slashed, slashing needs an objective misbehavior trigger, and nothing
+  on-chain distinguishes a sybil from a punctual friend - so the stake is
+  blocked on an adjudication mechanism (a challenge game or juror system)
+  that would dwarf the protocol it protects. Revisit only with one in hand.

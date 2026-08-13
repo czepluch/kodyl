@@ -921,7 +921,7 @@ contract KodylTest is Test {
     }
 
     // ==================================================================
-    // reward cap + no-show rebate (C1)
+    // reward cap + no-show rebate
     // ==================================================================
 
     function test_rewardCap_boundaryAtEqualCounts() public {

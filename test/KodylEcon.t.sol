@@ -123,10 +123,10 @@ contract KodylEconTest is Test {
     }
 
     // ==================================================================
-    // 2. Sybil capture, bounded by C1: the fake-event scam. Exclude everyone
-    // honest, check in one sock puppet - the reward cap holds the sybil to
-    // ONE deposit of profit however many victims registered, and the excess
-    // rebates to the victims.
+    // 2. Sybil capture, bounded by the reward cap: the fake-event scam.
+    // Exclude everyone honest, check in one sock puppet - the cap holds the
+    // sybil to ONE deposit of profit however many victims registered, and
+    // the excess rebates to the victims.
     // ==================================================================
 
     function test_econ_sybilCaptureBoundedToOneDeposit() public {
@@ -262,7 +262,7 @@ contract KodylEconTest is Test {
 
     // ==================================================================
     // 5. Abandonment: check in nobody and the event settles as abandoned -
-    // refunds open for everyone, nobody profits, nothing sweeps (C2).
+    // refunds open for everyone, nobody profits, nothing sweeps.
     // ==================================================================
 
     function test_econ_abandonmentRefundsEveryone() public {
@@ -369,8 +369,8 @@ contract KodylEconTest is Test {
     }
 
     // ==================================================================
-    // 8. Maintainer-as-organizer self-capture is DEAD (C2): abandoning an
-    // own event routes nothing anywhere - the pot refunds.
+    // 8. Maintainer-as-organizer self-capture is DEAD: abandoning an own
+    // event routes nothing anywhere - the pot refunds.
     // ==================================================================
 
     function test_econ_maintainerSelfCaptureDefeated() public {
@@ -501,8 +501,10 @@ contract KodylEconTest is Test {
         vm.stopPrank();
 
         _settle();
-        uint256 uncapped = (m * dep) / (c + s);
-        uint256 share = uncapped > dep ? dep : uncapped;
+        // With cap multiple 1 the cap binds exactly when no-shows outnumber
+        // claimants (m > c+s), and then the reward is exactly one deposit.
+        bool capped = m > c + s;
+        uint256 share = capped ? dep : (m * dep) / (c + s);
         for (uint256 i = 0; i < c; ++i) {
             vm.prank(hon[i]);
             k.claim(eid);
@@ -517,14 +519,17 @@ contract KodylEconTest is Test {
         }
         assertEq(sybilTotal, s * share, "sybil block extraction");
 
-        // Rebate leg (cap binding) and dust remainder, both regimes exact.
-        uint256 rebatePer = m * dep > (c + s) * dep ? (m * dep - (c + s) * dep) / m : 0;
+        // Rebate leg and dust, all three regimes exact: uncapped; capped with
+        // a claimable per-no-show rebate; capped with the excess too small to
+        // split (floor 0: NothingToRebate on-chain, the excess stays dust and
+        // the early all-claimed sweep door stays open).
+        uint256 rebatePer = capped ? ((m - (c + s)) * dep) / m : 0;
         for (uint256 i = 0; i < m && rebatePer > 0; ++i) {
             vm.prank(ns[i]);
             k.claimNoShowRebate(eid);
             assertEq(ns[i].balance, rebatePer, "no-show rebate share");
         }
-        uint256 remainder = rebatePer > 0 ? (m * dep - (c + s) * dep) % m : (m * dep) % (c + s);
+        uint256 remainder = capped ? (m - (c + s)) * dep - m * rebatePer : (m * dep) % (c + s);
         if (remainder > 0) {
             if (rebatePer > 0) vm.warp(eventEnd + disputePeriod + 30 days + 1);
             k.claimDust(eid);

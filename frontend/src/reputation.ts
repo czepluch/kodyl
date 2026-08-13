@@ -1,7 +1,7 @@
 // Organizer track record, derived from the already-loaded event list (the
 // app enumerates every event since deployment, so the record is complete).
-// This is C3 of the adversarial-economics work (ECONOMICS.md): the capture
-// attacks leave loud counter footprints - a settled event with one claimant
+// The reputation surface of the adversarial-economics work (ECONOMICS.md):
+// the capture attacks leave loud counter footprints - a settled event with one claimant
 // among many registrants, a zero-check-in settlement - and this makes them
 // legible at the moment they matter: before an attendee pays a deposit to a
 // stranger. Detection, not prevention: nothing here blocks registration.
