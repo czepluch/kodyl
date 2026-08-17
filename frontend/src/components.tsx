@@ -305,14 +305,17 @@ function TicketButton({ ev }: { ev: EventView }) {
   )
 }
 
-// Check-in area on the event page: the roster path (organizer transaction) and
-// the proof-based Door path (sign a Presence, submit anyone's pair) as tabs.
-// An operator gets the Door alone - the roster path is organizer-only
-// on-chain, so its tab would only offer a guaranteed revert.
+// Check-in area on the event page: the Manual tab (organizer ticks people off
+// the registered list, a plain checkIn/checkInBatch transaction) and the
+// proof-based Door tab (sign a Presence, submit anyone's pair). An operator
+// gets the Door alone - the direct path is organizer-only on-chain, so its
+// tab would only offer a guaranteed revert. ("Manual", not "Roster": the
+// read-only Attendees list below is the roster, and naming both invited
+// confusion.)
 function CheckIn({ ev, roster, organizer }: { ev: EventView; roster: RosterEntry[]; organizer: boolean }) {
   const [tab, setTab] = useState<'roster' | 'door'>(organizer ? 'roster' : 'door')
   // Losing the organizer role without unmounting (identity switch while an
-  // operator keeps the area alive) hides the Roster tab; land on the Door so
+  // operator keeps the area alive) hides the Manual tab; land on the Door so
   // the active tab always exists.
   useEffect(() => {
     if (!organizer) setTab('door')
@@ -322,7 +325,7 @@ function CheckIn({ ev, roster, organizer }: { ev: EventView; roster: RosterEntry
       <div className="tabs">
         {organizer && (
           <button className={tab === 'roster' ? 'tab active' : 'tab'} onClick={() => setTab('roster')}>
-            Roster
+            Manual
           </button>
         )}
         <button className={tab === 'door' ? 'tab active' : 'tab'} onClick={() => setTab('door')}>
@@ -728,8 +731,9 @@ export function OperatorsPanel({ ev }: { ev: EventView }) {
 
   return (
     <div className="operators">
-      <h3 className="roster-h">Door operators <span className="muted">(from event logs)</span></h3>
+      <h3 className="roster-h">Door operators</h3>
       <p className="muted" style={{ fontSize: 12, margin: '0 0 8px' }}>
+        As organizer you always have door authority; operators are additional door staff.
         An operator&rsquo;s Presence signature checks attendees in with your full authority - appoint accordingly.
         Removal takes effect immediately; their earlier submitted check-ins stand.
       </p>

@@ -118,7 +118,7 @@ export function EventPage({ id }: { id: bigint }) {
       {/* Any state: operators can be appointed before or during the event. */}
       {isOrganizer(ev, session.address) && <OperatorsPanel ev={ev} />}
 
-      <h3 className="roster-h">Attendees <span className="muted">(from event logs)</span></h3>
+      <h3 className="roster-h">Attendees</h3>
       {roster === null ? (
         <p className="muted">Loading roster&hellip;</p>
       ) : roster.length === 0 ? (
