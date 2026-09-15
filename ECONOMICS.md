@@ -57,7 +57,7 @@ is turnout-independent: profit is exactly one deposit for ANY victim count
 and deposit size, and aggregate victim loss equals it
 (`testFuzz_econ_sybilProfitCappedAtOneDeposit`).
 
-- **Cost**: gas only (appendix: register + checkIn + claim, about 201k
+- **Cost**: gas only (appendix: register + checkIn + claim, about 202k
   in-EVM across three transactions), but the REAL cost was never gas - it is
   credibly marketing a fake event. At one deposit of revenue per fake event,
   the scam does not scale and does not pay.
@@ -202,21 +202,22 @@ means no ETH at risk and no transaction required beyond doing nothing.
 ## Measured gas appendix
 
 In-EVM call gas measured with `gasleft()` deltas in a forge harness against
-the committed bytecode at toolchain pin `1fb1f880` (forge's `--gas-report`
+the committed bytecode at toolchain pin `0976798e` (forge's `--gas-report`
 cannot attribute calls to a raw-hex deploy). Add ~21k intrinsic plus calldata
-gas per transaction for an on-chain cost. Measured 2026-08-13, with the
-reward cap and rebate in the bytecode:
+gas per transaction for an on-chain cost. Measured 2026-09-15, after the
+new-syntax migration and the ledger-module refactor - within about one
+percent of the pre-migration numbers:
 
 | Call | Gas (in-EVM) |
 |---|---|
-| `register` (11th registrant) | 40,110 |
-| `checkIn` (direct, single) | 74,496 |
-| `checkInWithProof` (operator-signed) | 85,305 |
-| `setOperator` (enable) | 29,895 |
-| `claim` (capped reward) | 86,824 |
-| `claimNoShowRebate` (first rebate) | 131,069 |
-| `claimDust` (timeout sweep) | 48,140 |
-| `cancel` (griefer exit) | 63,579 |
+| `register` (11th registrant) | 40,358 |
+| `checkIn` (direct, single) | 73,841 |
+| `checkInWithProof` (operator-signed) | 84,650 |
+| `setOperator` (enable) | 29,947 |
+| `claim` (capped reward) | 87,338 |
+| `claimNoShowRebate` (first rebate) | 131,028 |
+| `claimDust` (timeout sweep) | 48,370 |
+| `cancel` (griefer exit) | 63,848 |
 
 At any plausible gas price these are noise next to a single 1 ETH deposit:
 the economics above are dominated entirely by the deposit flows.

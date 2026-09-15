@@ -31,7 +31,7 @@ fi
 
 if [ ! -f "$HEX" ]; then
     echo "Compiling core contracts first..."
-    "$ROOT/scripts/check-core.sh" "$ROOT/core/Kodyl.solc"
+    "$ROOT/scripts/check-core.sh" "$ROOT/core/Kodyl.sol"
 fi
 
 echo "Deploying Kodyl to $RPC (maintainer=$MAINTAINER)"

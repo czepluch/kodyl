@@ -9,7 +9,7 @@ pragma solidity ^0.8.33;
 ///         of every signature here is verified by the test suites; this is the
 ///         ABI mirror of that tested surface.
 interface KodylAbi {
-    // ---- events (hand-rolled via log opcodes in Kodyl.solc) ----
+    // ---- events (hand-rolled via log opcodes in Kodyl.sol) ----
     event EventCreated(
         uint256 indexed eventId, address indexed organizer, uint256 depositAmount, uint256 eventStart, uint256 eventEnd
     );
@@ -25,7 +25,7 @@ interface KodylAbi {
     event MaintainerUpdated(address indexed oldMaintainer, address indexed newMaintainer);
     event OperatorSet(uint256 indexed eventId, address indexed operator, bool enabled);
 
-    // ---- errors (hand-rolled selectors via keccakLit in Kodyl.solc) ----
+    // ---- errors (hand-rolled selectors via keccakLit in Kodyl.sol) ----
     error EventNotFound();
     error RegistrationClosed();
     error AlreadyRegistered();
@@ -57,7 +57,7 @@ interface KodylAbi {
     /// @dev checkInBatchWithProofs array arguments differ in length.
     error ProofArrayMismatch();
 
-    // ---- errors (std dispatcher / decoder, not declared in Kodyl.solc) ----
+    // ---- errors (std dispatcher / decoder, not declared in Kodyl.sol) ----
     /// @dev Value sent to a non-payable public function. Originates in the std
     ///      dispatcher's non-payable callvalue check; the name is chosen so its
     ///      canonical selector keccak("NonPayableReceivedValue()") equals the

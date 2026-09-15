@@ -10,7 +10,7 @@ a tribute to [Kickback](https://kickback.events/).
 ## What this repo is
 
 This is a from-scratch implementation of Kodyl in
-[**Core Solidity**](https://github.com/argotorg/solcore) (`.solc`), the
+[**Core Solidity**](https://github.com/argotorg/solcore) (`.sol`), the
 research language compiled by `sol-core`. It is a deliberate exercise in
 building a real, non-trivial contract on the language as it exists today -
 leaning into what it does well (payload-carrying ADTs as first-class storage,
@@ -30,9 +30,9 @@ how every mechanic in [`spec.md`](./spec.md) maps to a test.
 
 | Path | What |
 |---|---|
-| `core/Kodyl.solc` | the contract - the whole protocol, one singleton |
-| `core/kodyl.solc` | shared module: the infrastructure the language doesn't provide yet (checked-math shims, revert/event builders, env wrappers) |
-| `core/Probe.solc` | a toolchain canary that exercises the full compile pipeline |
+| `core/Kodyl.sol` | the contract - the whole protocol, one singleton |
+| `core/kodyl.sol` | shared module: the infrastructure the language doesn't provide yet (checked-math shims, revert/event builders, env wrappers) |
+| `core/Probe.sol` | a toolchain canary that exercises the full compile pipeline |
 | `core/README.md`, `core/COVERAGE.md` | design + deviations, and the spec-to-test map |
 | `scripts/check-core.sh` | the compile pipeline: `sol-core` -> `yule` -> `solc` -> deployable hex |
 | `scripts/deploy-anvil.sh`, `scripts/seed-anvil.sh` | deploy + seed a local node |
@@ -65,7 +65,7 @@ Rebuilding the bytecode itself needs the pinned toolchain:
 
 ```shell
 ./scripts/pin-toolchain.sh <solcore-checkout>   # one-time; requires nix
-./scripts/check-core.sh                         # .solc -> Yul -> deployable hex
+./scripts/check-core.sh                         # .sol -> Yul -> deployable hex
 ```
 
 `pin-toolchain.sh` nix-builds `sol-core`/`yule` from a solcore checkout into

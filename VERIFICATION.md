@@ -38,7 +38,7 @@ byte-identical files, or the claim fails. Requires nix.
 git clone https://github.com/argotorg/solcore
 git -C solcore checkout "$(awk '/^solcore_rev/{print $2}' core/build/TOOLCHAIN)"
 ./scripts/pin-toolchain.sh ./solcore     # nix-builds sol-core/yule, snapshots std
-./scripts/check-core.sh                  # .solc -> hull -> Yul -> hex
+./scripts/check-core.sh                  # .sol -> hull -> Yul -> hex
 git diff --exit-code -- core/build/Kodyl.hex core/build/Probe.hex \
                         core/build/Kodyl.yul core/build/Probe.yul
 ```

@@ -1,6 +1,6 @@
 # Kodyl demo frontend
 
-A local-testnet UI for the Core Solidity `Kodyl` contract (`core/Kodyl.solc`),
+A local-testnet UI for the Core Solidity `Kodyl` contract (`core/Kodyl.sol`),
 structured around the roles the contract actually has. React + viem talking to
 anvil. See `ROLES-PLAN.md` for the design rationale.
 
@@ -57,7 +57,7 @@ Registration -> Active -> Dispute -> Settled in seconds (anvil's
 From the repo root, with the Foundry toolchain on PATH:
 
 ```bash
-./scripts/check-core.sh core/Kodyl.solc   # compile to bytecode
+./scripts/check-core.sh core/Kodyl.sol   # compile to bytecode
 anvil                                      # local node (leave running)
 ./scripts/deploy-anvil.sh                  # deploy; writes src/deployment.json
 ./scripts/seed-anvil.sh                    # a couple of demo events

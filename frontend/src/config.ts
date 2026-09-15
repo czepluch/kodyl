@@ -70,7 +70,7 @@ export function walletFor(pk: Hex) {
   return createWalletClient({ account: privateKeyToAccount(pk), chain, transport: http(RPC_URL) })
 }
 
-// ADT ordinals exposed across the ABI boundary as uint256 (see Kodyl.solc).
+// ADT ordinals exposed across the ABI boundary as uint256 (see Kodyl.sol).
 // Compare with STATE/STATUS, render with the label tables (same ordinals).
 export const STATE_LABELS = ['Registration', 'Active', 'Dispute', 'Settled', 'Cancelled'] as const
 export const STATUS_LABELS = ['None', 'Registered', 'Cancelled', 'Checked in', 'Claimed', 'Rebated'] as const

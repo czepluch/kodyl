@@ -1,5 +1,5 @@
 # Foundry here is a TEST HARNESS only: the contract itself is Core Solidity
-# (core/*.solc, compiled by scripts/check-core.sh). The tests under test/ deploy
+# (core/*.sol, compiled by scripts/check-core.sh). The tests under test/ deploy
 # that compiled bytecode and drive it, so there is no Solidity `src` tree.
 [profile.default]
 src = "test"

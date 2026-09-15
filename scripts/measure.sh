@@ -20,7 +20,7 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 HEX="$ROOT/core/build/Kodyl.hex"
 if [ ! -f "$HEX" ]; then
     echo "Compiling core contracts first..."
-    "$ROOT/scripts/check-core.sh" "$ROOT/core/Kodyl.solc"
+    "$ROOT/scripts/check-core.sh" "$ROOT/core/Kodyl.sol"
 fi
 
 PORT="${1:-$((21000 + RANDOM % 9000))}"

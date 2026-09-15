@@ -143,7 +143,7 @@ test also cross-checks the contract's hand-rolled hashing.
 | A setOperator bool word above 1 reverts DirtyHigherBitsForBool (strict decode); the clean word goes through | test_setOperator_dirtyBoolWordReverts |
 | Wrong-length signature reverts InvalidSignatureLength (ticket and presence positions) | test_proofCheckIn_invalidSignatureLengthReverts |
 | High-s signature reverts MalleableSignatureRejected | test_proofCheckIn_malleableHighSReverts |
-| Invalid recovery (v = 0) reverts ECRecoverFailed, never a stale scratch signer (recoverStrict regression; mutation-verified) | test_proofCheckIn_invalidRecoveryDoesNotReturnStaleSigner |
+| Invalid recovery (v = 0) reverts ECRecoverFailed, never a stale scratch signer (pins the upstream scratch-zeroing fix that retired the recoverStrict shim) | test_proofCheckIn_invalidRecoveryDoesNotReturnStaleSigner |
 | Domain binding: a digest signed for a different verifyingContract or chainId fails signer equality | test_proofCheckIn_domainBindingRejectsForeignDigests |
 | State gates: Registration / Settled / cancelled all revert CheckInWindowClosed | test_proofCheckIn_stateGates |
 | Unknown event reverts EventNotFound (single and batch) | test_proofCheckIn_unknownEventReverts |
@@ -156,10 +156,11 @@ test also cross-checks the contract's hand-rolled hashing.
 
 ## Toolchain canaries (test/CoreProbe.t.sol)
 
-`Probe.solc` exercises each language feature the implementation leans on;
+`Probe.sol` exercises each language feature the implementation leans on;
 `check-core.sh` compiles it first, so drift fails on the small labeled contract
 before Kodyl. The v2 additions pin the EIP-712 / ecrecover / calldata-array
-surface the proof path depends on.
+surface the proof path depends on; the new-syntax migration added the three
+storage-pattern canaries at the bottom.
 
 | Behavior | Verified by |
 |---|---|
@@ -174,9 +175,12 @@ surface the proof path depends on.
 | High-s form reverts MalleableSignatureRejected (0x25260b20) | test_probe_ecrecover_malleableHighS_reverts |
 | An unrecoverable signature reverts ECRecoverFailed (0x4fbfae63) - std ecrecover never returns zero | test_probe_ecrecover_invalid_revertsFailed |
 | ECRecoverCallFailed is unobservable: gas starvation is a plain OOG with empty returndata (swept window with a top-edge success assert) | test_probe_ecrecover_gasStarved_isPlainOogNotCallFailed |
-| calldata(array(address)): length, indexing, ArrayOutOfBounds (0x7f52b2bf) | test_probe_calldataAddressArray |
-| calldata(array(memory(bytes))): dynamic elements incl. a 65-byte signature element, bounds, empty array | test_probe_calldataBytesArray |
-| calldata(array(uint256)): index, bounds, full iteration (no upstream fixture - this canary is the coverage) | test_probe_calldataUintArray |
+| calldata<array<address>>: length, indexing, ArrayOutOfBounds (0x7f52b2bf) | test_probe_calldataAddressArray |
+| calldata<array<memory<bytes>>>: dynamic elements incl. a 65-byte signature element, bounds, empty array | test_probe_calldataBytesArray |
+| calldata<array<uint256>>: index, bounds, full iteration (no upstream fixture - this canary is the coverage) | test_probe_calldataUintArray |
+| Enum with a struct payload as a mapping value: zero slot = first constructor, named field access on the match-bound payload | test_probe_enumStructPayloadInMapping |
+| Struct as a mapping value: read-reconstruct-write update (member writes through a mapping are SC0231 at this pin) | test_probe_structMappingValueUpdate |
+| ERC-7201-namespaced slots via comptime erc7201 + hash2 with raw sload/sstore: round-trip and key isolation | test_probe_namespacedSlots |
 
 ## Adversarial economics (spec.md "Trust Assumptions" / "Attack Vectors")
 

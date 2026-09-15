@@ -1373,10 +1373,12 @@ contract KodylTest is Test {
     function test_proofCheckIn_invalidRecoveryDoesNotReturnStaleSigner() public {
         // Regression for the std ecrecover scratch-reuse defect: v outside
         // {27,28} makes the precompile return empty, and without pre-zeroing
-        // the scratch slot ecrecover would hand back a stale address. The
-        // recoverStrict shim forces the intended ECRecoverFailed instead of a
-        // spurious signer match. Assert the failure surfaces (never a silent
-        // success or a stale-address TicketSignerMismatch that hides it).
+        // the scratch slot ecrecover would hand back a stale address. std
+        // now pre-zeroes the slot itself (the upstream fix that retired the
+        // local recoverStrict shim); this pins that guarantee - the intended
+        // ECRecoverFailed instead of a spurious signer match. Assert the
+        // failure surfaces (never a silent success or a stale-address
+        // TicketSignerMismatch that hides it).
         (uint256 eid, , uint256 orgPk, address dana, uint256 danaPk) = _proofSetup();
         bytes memory presence = _signPresence(orgPk, eid, dana);
 

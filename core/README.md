@@ -15,34 +15,42 @@ Solidity's natural unit is **a value in a typed map**, so this is a
 singleton:
 
 - An event is a payload-carrying ADT:
-  `data EventRec = NoEvent | Ev(organizer, deposit, deadline, start, end, dispute, cap)`
-  stored in `mapping(uint256, EventRec)`. "Deployment" is a state write;
-  createEvent returns a sequential id.
+  `enum EventRec { NoEvent, Ev(EventRecord) }` - the payload a named
+  `struct EventRecord` - stored in `mapping(uint256 => EventRec)`.
+  "Deployment" is a state write; createEvent returns a sequential id.
+  The design rule throughout: **sums stay pattern-matched** (exhaustiveness
+  is what the type system buys), **wide products carry field names**
+  (`rec.eventStart`, not position four of a seven-slot positional
+  destructure where five fields share a type and a silent swap typechecks).
 - `NoEvent` is declared first, so an unset id reads back as `NoEvent` from
   the zero slot pattern, and **exhaustive matching forces every function to
   handle the missing-event case** - the type system does what address
   checks do in Solidity.
 - Attendee status is the same idea one level down:
-  `mapping(uint256, mapping(address, AttendeeStatus))` with `None` first.
-- Per-event tallies are the product-type dual of the same idea: one positional
-  value, `data Counters = Counters(uint256, uint256, uint256, uint256)`
-  (registered, checkedIn, claimed, held), behind the event id - a
-  single-constructor product lays out with no tag word, so an unset id reads
-  back as `Counters(0, 0, 0, 0)`, the zero-slot rule shared with
-  `NoEvent`/`None`. The whole-record read-modify-write has a measured gas
-  cost (+4-6k on single-mutation tests, e.g. +5036 on the register happy
-  path; only +167 on the 100-attendee batch, whose counters write happens
-  once per call) - a trade taken deliberately for one value per event.
+  `mapping(uint256 => mapping(address => AttendeeStatus))` with `None` first.
+- Per-event tallies are the product-type dual of the same idea: one named
+  record, `struct Counters { registered; checkedIn; claimed }`, behind the
+  event id - a plain product lays out with no tag word, so an unset id reads
+  back as `Counters(0, 0, 0)`, the zero-slot rule shared with
+  `NoEvent`/`None`. Updates read the record and write a whole reconstructed
+  value: partly the deliberate one-value-per-event trade, partly forced -
+  struct member assignment through a mapping value is unimplemented at this
+  pin (SC0231).
 - Lifecycle state is never stored; it is derived from timestamps by a pure
   function and matched on.
-- Custody is shared (one contract balance), so accounting is explicit: a
-  per-event pot (`held`) plus a global ledger (`totalHeld`), with
-  `balance >= totalHeld` asserted after every ETH movement. The direction is
-  `>=`, not `==`: forced ETH (selfdestruct / block-reward payments) can push
-  the balance above the ledger and cannot be rejected (see the Security
-  review section). A side benefit: per-event dust is exact - `claimDust`
-  pays out the pot, not a balance reading.
-- Proof-based check-in rides on the std's EIP-712 helpers (`std/eip712.solc`,
+- Custody is shared (one contract balance), and the accounting is an opaque
+  module, `lib.ledger`: the per-event pot and the global total live at
+  ERC-7201-namespaced slots owned by the module, whose only exports are
+  `potOf` / `ledgerTotal` / `credit` / `payOut`. The raw slot accessors and
+  the ETH transfer are module-private, so "debit both ledgers, then send,
+  then assert `balance >= total`" is not a convention reviewers check at
+  five call sites - it is the only reachable order, and the invariant is
+  asserted inside the module. The direction is `>=`, not `==`: forced ETH
+  (selfdestruct / block-reward payments) can push the balance above the
+  ledger and cannot be rejected (see the Security review section). A side
+  benefit: per-event dust is exact - `claimDust` pays out the pot, not a
+  balance reading.
+- Proof-based check-in rides on the std's EIP-712 helpers (`std/eip712.sol`,
   the argotorg pin). Two hand-rolled struct hashes (`Ticket(uint256 eventId)`,
   `Presence(uint256 eventId,address attendee)`) built with
   `concat`/`keccak256_` - there is no `hashStruct` helper - feed the 0x1901
@@ -50,23 +58,23 @@ singleton:
   no expiry of its own: the derived-state check-in gate (Active/Dispute) is
   the single time bound - one gate, not two. Both
   `checkInWithProof` and `checkInBatchWithProofs` share one internal
-  `verifyProof`, and `ecrecover` goes through a `recoverStrict` shim that
-  zeroes the scratch slot first (std's `ecrecover` reads its result from
-  scratch without pre-zeroing, so an invalid recovery would otherwise return
-  a stale word instead of reverting - see the Security review section).
-  Door operators are a nested-mapping set, `mapping(uint256, mapping(address,
-  bool))`, gated organizer-only, managed by `setOperator(eid, operator, bool)` -
-  the public `bool` parameter decodes strictly (a word above 1 reverts
-  `DirtyHigherBitsForBool`), courtesy of the std's `bool:ABIDecode` instance
-  landed at the `1fb1f880` re-pin.
+  `verifyProof`, calling std `ecrecover` directly: at this pin it pre-zeroes
+  its return scratch (the defect we filed upstream was fixed - see the
+  Security review section) and rejects malleable and failed recoveries.
+  Door operators are a nested-mapping set, `mapping(uint256 =>
+  mapping(address => bool))`, gated organizer-only, managed by
+  `setOperator(eid, operator, bool)` - the public `bool` parameter decodes
+  strictly (a word above 1 reverts `DirtyHigherBitsForBool`), courtesy of
+  the std's bool `ABIDecode` impl landed at the `1fb1f880` re-pin.
 
 ## Layout
 
 | File | Role |
 |---|---|
-| `Kodyl.solc` | The whole protocol: one contract, 33 entry points (32 typed public functions plus `checkInBatch` through the payable fallback) |
-| `kodyl.solc` | Shared module (`import lib.kodyl.{*}`): infrastructure the language does not provide yet - checked-math shims, revert/event builders, env wrappers, validation |
-| `Probe.solc` | Toolchain canary: minimal contract proving the pipeline end to end |
+| `Kodyl.sol` | The whole protocol: one contract, 33 entry points (32 typed public functions plus `checkInBatch` through the payable fallback) |
+| `kodyl.sol` | Shared module (`import * from lib.kodyl`): infrastructure the language does not provide yet - checked-math shims, revert/event builders, env wrappers, validation, signature splitting |
+| `ledger.sol` | Custody module (`import * from lib.ledger`): pot + total at namespaced slots, `credit`/`payOut` the only mutations, the raw transfer unexported |
+| `Probe.sol` | Toolchain canary: minimal contract proving the pipeline end to end |
 | `build/` | Pipeline output; the deployable `.hex`, generated `.yul`, and `TOOLCHAIN` stamp are committed (so `forge test` works without the toolchain), `.hull`/`.abi` intermediates stay local |
 | `COVERAGE.md` | spec.md mechanics and invariants mapped to tests |
 
@@ -84,26 +92,30 @@ and `test/KodylEcon.t.sol` (the adversarial-economics payoff matrix behind
 `ECONOMICS.md`: exact per-actor ETH deltas for each attack strategy),
 drive the compiled bytecode through a typed Solidity interface inside forge -
 selectors, event topics, and revert payloads are asserted byte-for-byte.
-`test/CoreProbe.t.sol` adds 14 canary tests pinning the language behaviors the
-design leans on (raw-bytes `require` reverts, `Str`-instance selector folding,
+`test/CoreProbe.t.sol` adds 17 canary tests pinning the language behaviors the
+design leans on (raw-bytes `require` reverts, `Str`-impl selector folding,
 UFCS storage arrays, bare literals, std eip712 helpers plus the hand-rolled
 hashStruct pattern, split-form `ecrecover` with its revert-not-zero failure
-modes, and lazy calldata dynamic arrays: address, bytes, and uint256
-elements).
+modes, lazy calldata dynamic arrays: address, bytes, and uint256 elements,
+enum-with-struct-payload mapping values, the struct read-reconstruct-write
+mapping update, and ERC-7201-namespaced slots).
 
 ## What the language provides vs what the module shims
 
 Provided by the language and leaned on hard: ADT storage with derived
 `CanStore` (including the 8-slot `EventRec` behind a mapping and the tagless
-`Counters` product), exhaustive `match` with payload binding, nested mappings,
-storage arrays of strings with UFCS methods (`uris.push(u)`, `uris.length()`,
-indexing), user-defined `Str` instances (a string literal at a typed position
+`Counters` record), named `struct` fields with member access on match-bound
+payloads, exhaustive `match` with payload binding, nested mappings, storage
+arrays of strings with UFCS methods (`uris.push(u)`, `uris.length()`,
+indexing), user-defined `Str` impls (a string literal at a typed position
 folds through `fromString` at compile time - the `ErrSel` selector mechanism),
-bare integer literals at `uint256` sites, canonical Solidity selectors from
-dispatch, `payable` dispatch, compile-time-folded `keccakLit`, for-loops, and
-the module system.
+comptime `erc7201` namespacing, bare integer literals at `uint256` sites,
+canonical Solidity selectors from dispatch, `payable` dispatch,
+compile-time-folded `keccakLit`, for-loops, and the module system - including
+export lists as visibility boundaries, which is what makes `lib.ledger`'s
+opacity real rather than advisory.
 
-Shimmed in `kodyl.solc` because the language does not have it yet (each maps
+Shimmed in `kodyl.sol` / `ledger.sol` because the language does not have it yet (each maps
 to a tracked upstream gap). The list is also a changelog of the language
 closing gaps: it has shrunk twice - the `8a77bd3f` re-pin brought runtime
 string literals, moving item 4 from fully-shimmed to wire-shape-only, and the
@@ -136,7 +148,7 @@ the pinned rev.
    rejects stray ETH (empty calldata reverts) and hand-decodes
    `checkInBatch(uint256,address[])` from raw calldata. The hand-decoding
    predates the `1950e707` re-pin, which brought lazy calldata dynamic-array
-   decoding (`calldata(array(T))` params with `arr[i]`/`arr.length()`; the
+   decoding (`calldata<array<T>>` params with `arr[i]`/`arr.length()`; the
    memory-array decoder is still a stub). `checkInBatch` stays hand-decoded
    deliberately - wire compat, the ETH rejection lives in the same fallback,
    and it is the exhibit of what pre-decoder Core Solidity required.
@@ -156,19 +168,23 @@ declaration order:
 |---:|---|---|
 | 0 | `maintainer` | `address` |
 | 1 | `eventCount` | `uint256` |
-| 2 | `totalHeld` | `uint256` |
-| 3 | `eventsRec` | `mapping(uint256, EventRec)` |
-| 4 | `metadataUris` | `array(string)` (length word) |
-| 5 | `cancelledM` | `mapping(uint256, bool)` |
-| 6 | `statusM` | `mapping(uint256, mapping(address, AttendeeStatus))` |
-| 7 | `countersM` | `mapping(uint256, Counters)` |
-| 8 | `operatorsM` | `mapping(uint256, mapping(address, bool))` |
+| 2 | `eventsRec` | `mapping(uint256 => EventRec)` |
+| 3 | `metadataUris` | `array<string>` (length word) |
+| 4 | `cancelledM` | `mapping(uint256 => bool)` |
+| 5 | `statusM` | `mapping(uint256 => mapping(address => AttendeeStatus))` |
+| 6 | `countersM` | `mapping(uint256 => Counters)` |
+| 7 | `operatorsM` | `mapping(uint256 => mapping(address => bool))` |
+
+The money is not in the contract's declared fields at all: `lib.ledger` owns
+the global total at the `erc7201("kodyl.ledger.total")` slot and each
+event's pot at `hash2(erc7201("kodyl.ledger.pot"), eid)` - module-owned
+namespaced storage, unreachable by slot number.
 
 A mapping value lives at `keccak256(slot ++ key)` - note the argument order,
 which is **reversed** from classic Solidity's `keccak256(key ++ slot)`.
 Nested mappings iterate the rule: a `statusM` entry sits at
-`keccak256(keccak256(6 ++ eid) ++ attendee)`, and an `operatorsM` entry at
-`keccak256(keccak256(8 ++ eid) ++ operator)`. Dynamic arrays and strings
+`keccak256(keccak256(5 ++ eid) ++ attendee)`, and an `operatorsM` entry at
+`keccak256(keccak256(7 ++ eid) ++ operator)`. Dynamic arrays and strings
 match classic Solidity exactly: array length at slot `p`, element `i` at
 `keccak256(p) + i`, strings in the usual short/long form.
 
@@ -176,22 +192,25 @@ At its hashed base slot, an ADT value lays out per its derived `Generic`
 representation:
 
 - `EventRec` is a two-constructor sum: one tag word (0 = `NoEvent`,
-  1 = `Ev`), then seven payload slots - organizer, depositAmount,
-  cancellationDeadline, eventStart, eventEnd, disputePeriod, maxAttendees -
-  eight slots per event.
-- `Counters` is a single-constructor product: no tag word, four consecutive
-  slots - registered, checkedIn, claimed, held.
-- `AttendeeStatus` has five nullary constructors and its derived
+  1 = `Ev`), then the `EventRecord` struct's seven field slots - organizer,
+  deposit, cancellationDeadline, eventStart, eventEnd, disputePeriod,
+  maxAttendees - eight slots per event, identical to the old positional
+  payload.
+- `Counters` is a plain named product: no tag word, three consecutive
+  slots - registered, checkedIn, claimed. (The pot left for `lib.ledger`.)
+- `AttendeeStatus` has six nullary constructors and its derived
   representation is a nested binary sum, so the tag is unary across
   consecutive slots: a read walks 0/1 words and stops at the first 0.
-  `None` = `[0]` (the zero-slot rule), `Registered` = `[1,0]`,
-  `Cancelled` = `[1,1,0]`, `CheckedIn` = `[1,1,1,0]`,
-  `Claimed` = `[1,1,1,1]`. (A rewrite to a shorter constructor can leave
+  Measured with raw slot reads at this pin: `None` = `[0]` (the zero-slot
+  rule), `Registered` = `[1,0]`, `Cancelled` = `[1,1,0]`,
+  `CheckedIn` = `[1,1,1,0]`, `Claimed` = `[1,1,1,1,0]`,
+  `Rebated` = `[1,1,1,1,1]`. (A rewrite to a shorter constructor can leave
   stale deeper words; they are unreachable - the walk stops first.)
 
 Only the ABI and the events are stable interfaces for indexers. The slots
-above are an implementation detail of the std's derived `CanStore` instances
-and can renumber under refactors - the `Counters` refactor did exactly that.
+above are an implementation detail of the std's derived `CanStore` impls
+and can renumber under refactors - the ledger extraction did exactly that,
+removing the old `totalHeld` field and shifting every mapping down a slot.
 
 ## Design deviations from spec.md
 
@@ -290,17 +309,19 @@ fuzz runs under a forced-ETH regime asserting the tight ledger form
 `balance == totalHeld + forced ETH`.
 
 A third round covered the proof-based check-in (v2), again multi-agent with
-adversarial verification. The one finding worth recording here is a **latent
-std defect**: `std/eip712.solc`'s neighbour `ecrecover` (in `std/std.solc`)
-reads its result from scratch memory `[0, 32)` but never pre-zeroes it, and
-the precompile writes nothing on an invalid recovery (a `v` outside `{27, 28}`
-or an unrecoverable `r`/`s`, past the s-only malleability guard). The EVM
-leaves the return region untouched, so a stale scratch word would be returned
-as a bogus signer instead of reverting `ECRecoverFailed`. It was **not
-exploitable in Kodyl** (the stale value can never equal a registered attendee
-on the ticket check, and on the presence check it can only equal the attendee,
-who would have to be the organizer/operator anyway), but the guarantee was
-one refactor away from breaking, so `verifyProof` routes every recovery
-through `recoverStrict` (`mstore(0, 0)` then `ecrecover`), which forces the
-intended revert. Regression-pinned by `test_proofCheckIn_invalidRecoveryDoesNotReturnStaleSigner`
-(mutation-verified: raw `ecrecover` fails it) and reported upstream.
+adversarial verification. The one finding worth recording here was a **latent
+std defect**: std `ecrecover` read its result from scratch memory `[0, 32)`
+without pre-zeroing it, and the precompile writes nothing on an invalid
+recovery (a `v` outside `{27, 28}` or an unrecoverable `r`/`s`, past the
+s-only malleability guard) - so a stale scratch word would be returned as a
+bogus signer instead of reverting `ECRecoverFailed`. It was **not exploitable
+in Kodyl** (the stale value can never equal a registered attendee on the
+ticket check, and on the presence check it can only equal the attendee, who
+would have to be the organizer/operator anyway), but the guarantee was one
+refactor away from breaking, so `verifyProof` routed every recovery through a
+local `recoverStrict` shim (`mstore(0, 0)` then `ecrecover`) while the defect
+was reported upstream. Upstream fixed it (solcore PR 553: std now clears the
+scratch itself), the fix is in the pinned rev, and the shim is retired -
+`verifyProof` calls std `ecrecover` directly. The regression test
+`test_proofCheckIn_invalidRecoveryDoesNotReturnStaleSigner` stays, now
+pinning the upstream guarantee instead of the shim.
