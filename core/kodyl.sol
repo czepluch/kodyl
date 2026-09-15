@@ -19,7 +19,8 @@ export {
     balanceSelf,
     chainId,
     self,
-    recoverStrict,
+    Sig(*),
+    splitSig,
     panic,
     solAssert,
     addCk,
@@ -124,22 +125,34 @@ function self() returns (address) {
     return address(address_());
 }
 
-// ecrecover with the scratch slot zeroed first. Historical shim: the std
-// ecrecover at this pin pre-zeroes the scratch itself (the upstream defect we
-// filed was fixed), so this wrapper is now redundant defense in depth. It is
-// removed - and call sites go straight to std ecrecover - in the follow-up
-// commit, kept through the mechanical migration so this commit changes
-// spelling only.
-function recoverStrict(digest: bytes32, v: uint256, r: bytes32, s: bytes32) returns (address) {
-    mstore(0, 0);
-    return ecrecover(digest, v, r, s);
-}
+// --- signature splitting ---
+// (The recoverStrict scratch-zeroing shim that used to live here is gone:
+// std ecrecover pre-zeroes its return scratch at this pin - the upstream
+// defect we filed was fixed - and still enforces low-s and the
+// nonzero-result check, so call sites use std ecrecover directly.)
 
-// NOTE: the split-signature helper (enum Sig + splitSig) lives in Kodyl.sol,
-// not here, although this module is its natural home: at the OLD pin,
-// pattern-matching a constructor imported from another module failed SC0107.
-// The new qualified-pattern path lifts that restriction (probed at this pin),
-// so the pair moves here in the follow-up commit.
+// A split 65-byte r||s||v signature. A product ADT rather than a tuple
+// return (no tuple destructuring at let in the language), matched by
+// consumers via the qualified pattern (case Sig.Sig(...)). Lives here, in
+// the module that defines the signature-splitting concern: matching a
+// constructor imported from another module used to fail SC0107 at the old
+// pin, which forced this pair into Kodyl.sol; the qualified-pattern path
+// lifted that.
+enum Sig { Sig(bytes32, bytes32, uint256) }
+
+// Splits the 65-byte r||s||v wire format that signTypedData produces. v is
+// the raw recovery byte (27/28), passed through as uint256 - std ecrecover
+// takes uint256 and rejects invalid values itself.
+function splitSig(sig: memory<bytes>) returns (Sig) {
+    let p = Typedef.rep(sig);
+    requireK(mload(p) == 65, "InvalidSignatureLength()");
+    let r = bytes32(mload(p + 32));
+    let s = bytes32(mload(p + 64));
+    // Byte 64 of the payload (p + 32 + 64), taken as the top byte of its
+    // word; the shift leaves exactly the 8 v bits.
+    let v = shr(248, mload(p + 96));
+    return Sig(r, s, uint256(v));
+}
 
 // --- Solidity 0.8 semantics shims ---
 // Core Solidity arithmetic wraps and its assert hits the invalid opcode, so

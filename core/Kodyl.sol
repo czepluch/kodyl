@@ -17,7 +17,7 @@
 // balance above the ledger and cannot be rejected, so == would let 1 wei
 // permanently brick every flow. The surplus is simply unowned and stuck.
 import * from std;
-import {callvalue as callvalue_, shr, mload, calldatasize, calldataload} from std.opcodes;
+import {callvalue as callvalue_, shr, calldatasize, calldataload} from std.opcodes;
 import {frombool} from std;
 import * from std.dispatch;
 import * from std.Generic;
@@ -167,28 +167,6 @@ function hashPresence(eid: uint256, attendee: address) returns (bytes32) {
 function domainSep() returns (bytes32) {
     return eip712DomainSeparator(
         bytes32(keccakLit("Kodyl")), bytes32(keccakLit("1")), chainId(), self());
-}
-
-// A split 65-byte r||s||v signature. A product ADT rather than a tuple
-// return (no tuple destructuring at let in the language), matched by
-// consumers - the Counters idiom. Still defined HERE rather than in
-// lib.kodyl: the old pin rejected matching a constructor imported from
-// another module (SC0107); the new qualified-pattern path lifts that, and
-// the pair moves to the lib in the follow-up commit.
-enum Sig { Sig(bytes32, bytes32, uint256) }
-
-// Splits the 65-byte r||s||v wire format that signTypedData produces. v is
-// the raw recovery byte (27/28), passed through as uint256 - std ecrecover
-// takes uint256 and rejects invalid values itself.
-function splitSig(sig: memory<bytes>) returns (Sig) {
-    let p = Typedef.rep(sig);
-    requireK(mload(p) == 65, "InvalidSignatureLength()");
-    let r = bytes32(mload(p + 32));
-    let s = bytes32(mload(p + 64));
-    // Byte 64 of the payload (p + 32 + 64), taken as the top byte of its
-    // word; the shift leaves exactly the 8 v bits.
-    let v = shr(248, mload(p + 96));
-    return Sig(r, s, uint256(v));
 }
 
 contract Kodyl {
@@ -614,23 +592,24 @@ contract Kodyl {
 
     // One Ticket + Presence pair. Reverts on anything cryptographically
     // wrong; whether the attendee's status allows the flip is the
-    // caller's concern (checkInInner skips silently). recoverStrict returns a
-    // real signer or reverts (MalleableSignatureRejected / ECRecoverFailed) -
-    // never a stale scratch word - so no comparison here sees garbage. The
-    // domain separator is passed in so a batch hashes it once.
+    // caller's concern (checkInInner skips silently). std ecrecover
+    // pre-zeroes its return scratch and returns a real signer or reverts
+    // (MalleableSignatureRejected / ECRecoverFailed) - never a stale scratch
+    // word - so no comparison here sees garbage. The domain separator is
+    // passed in so a batch hashes it once.
     function verifyProof(eid: uint256, org: address, dom: bytes32,
                          attendee: address,
                          ticketSig: memory<bytes>, presenceSig: memory<bytes>) {
         match (splitSig(ticketSig)) {
         case Sig.Sig(r, s, v) {
-            requireK(recoverStrict(eip712Digest(dom, hashTicket(eid)), v, r, s) == attendee,
+            requireK(ecrecover(eip712Digest(dom, hashTicket(eid)), v, r, s) == attendee,
                      "TicketSignerMismatch()");
         }
         }
         match (splitSig(presenceSig)) {
         case Sig.Sig(r, s, v) {
             let signer =
-                recoverStrict(eip712Digest(dom, hashPresence(eid, attendee)), v, r, s);
+                ecrecover(eip712Digest(dom, hashPresence(eid, attendee)), v, r, s);
             // No short-circuit in the language - both operands always
             // evaluate; both are pure reads, so the fold is safe.
             requireK(signer == org || operatorsM[eid][signer],
