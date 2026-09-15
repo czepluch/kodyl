@@ -18,10 +18,20 @@
 //   addrAt/...      lazy calldata dynamic-array params: address (static
 //                   elements), memory<bytes> (dynamic elements), and uint256
 //                   (no upstream fixture - this canary is the coverage)
+//   putSlot/slotA   enum with a struct payload as a mapping value (the
+//                   EventRec shape): zero slot = first constructor, named
+//                   field access on the match-bound payload
+//   bumpTally/...   struct as a mapping value with the read-reconstruct-write
+//                   update (the Counters idiom; member writes through a
+//                   mapping value are SC0231 at this pin)
+//   nsWrite/nsRead  ERC-7201-namespaced slots via comptime erc7201 + hash2
+//                   and raw sload/sstore (the lib.ledger custody pattern)
 import * from std;
-import {timestamp, shr} from std.opcodes;
+import {timestamp, shr, sload, sstore} from std.opcodes;
 import * from std.dispatch;
 import * from std.eip712;
+import * from std.Generic;
+import * from std.StorageGeneric;
 
 // A selector type constructible from the error-signature literal itself:
 // "X()" folds to its right-aligned 4-byte selector at compile time via the
@@ -39,9 +49,27 @@ impl Str<Sel> {
     }
 }
 
+// Storage-canary types: a named product carried by a sum (EventRec's shape)
+// and a bare named product (Counters' shape). Defined at module level with
+// std.Generic + std.StorageGeneric visible - StorageSize derivation fires in
+// the DEFINING module only.
+struct PairRec {
+    a: uint256;
+    b: address;
+}
+
+enum PairSlot { Empty, Filled(PairRec) }
+
+struct Tally {
+    hits: uint256;
+    last: uint256;
+}
+
 contract Probe {
     stored: uint256;
     uris: array<string>;
+    slots: mapping(uint256 => PairSlot);
+    tallies: mapping(uint256 => Tally);
 
     constructor(x: uint256) {
         stored = x;
@@ -164,5 +192,41 @@ contract Probe {
             total = total + items[i];
         }
         return total;
+    }
+
+    // Enum with a struct payload as a mapping value: unset keys read the
+    // zero slot pattern (tag 0 = Empty), and the match-bound payload
+    // supports named field access.
+    function putSlot(k: uint256, a: uint256, b: address) public returns (()) {
+        slots[k] = PairSlot.Filled(PairRec(a, b));
+    }
+
+    function slotA(k: uint256) public returns (uint256) {
+        match (slots[k]) {
+        case PairSlot.Empty { revertEmpty(); return uint256(0); }
+        case PairSlot.Filled(rec) { return rec.a; }
+        }
+    }
+
+    // Struct as a mapping value: annotated let read (inference alone leaves
+    // the receiver unsolved, SC0299) and the whole-record reconstruct write.
+    function bumpTally(k: uint256, v: uint256) public returns (()) {
+        let t: Tally = tallies[k];
+        tallies[k] = Tally(t.hits + 1, v);
+    }
+
+    function tallyOf(k: uint256) public returns ((uint256, uint256)) {
+        let t: Tally = tallies[k];
+        return (t.hits, t.last);
+    }
+
+    // ERC-7201-namespaced storage addressed by comptime erc7201 + hash2,
+    // read and written with raw sload/sstore.
+    function nsWrite(k: uint256, v: uint256) public returns (()) {
+        sstore(hash2(Typedef.rep(erc7201("probe.ns")), Typedef.rep(k)), Typedef.rep(v));
+    }
+
+    function nsRead(k: uint256) public returns (uint256) {
+        return uint256(sload(hash2(Typedef.rep(erc7201("probe.ns")), Typedef.rep(k))));
     }
 }

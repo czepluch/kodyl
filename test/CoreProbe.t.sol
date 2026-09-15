@@ -292,4 +292,55 @@ contract CoreProbeTest is Test {
         assertTrue(ok, "sumOf reverted");
         assertEq(abi.decode(ret, (uint256)), 142, "iteration sum mismatch");
     }
+
+    /// Enum with a struct payload stored in a mapping (the EventRec shape):
+    /// an unset key reads back as the first constructor (tag 0 = Empty), and
+    /// the match-bound payload supports named field access.
+    function test_probe_enumStructPayloadInMapping() public {
+        (bool ok,) = p.call(abi.encodeWithSignature("slotA(uint256)", 7));
+        assertFalse(ok, "unset slot did not read as Empty and revert");
+
+        (ok,) = p.call(abi.encodeWithSignature("putSlot(uint256,uint256,address)", 7, 123, address(0xBEEF)));
+        assertTrue(ok, "putSlot reverted");
+
+        (bool ok2, bytes memory ret) = p.call(abi.encodeWithSignature("slotA(uint256)", 7));
+        assertTrue(ok2, "slotA reverted after put");
+        assertEq(abi.decode(ret, (uint256)), 123, "payload field mismatch");
+
+        // A different key still reads Empty: no cross-key bleed.
+        (ok,) = p.call(abi.encodeWithSignature("slotA(uint256)", 8));
+        assertFalse(ok, "neighbouring key not Empty");
+    }
+
+    /// Struct as a mapping value with the read-reconstruct-write update (the
+    /// Counters idiom; member writes through a mapping value are
+    /// unimplemented at this pin, SC0231).
+    function test_probe_structMappingValueUpdate() public {
+        (bool ok,) = p.call(abi.encodeWithSignature("bumpTally(uint256,uint256)", 1, 11));
+        assertTrue(ok, "first bump reverted");
+        (ok,) = p.call(abi.encodeWithSignature("bumpTally(uint256,uint256)", 1, 22));
+        assertTrue(ok, "second bump reverted");
+
+        (bool ok2, bytes memory ret) = p.call(abi.encodeWithSignature("tallyOf(uint256)", 1));
+        assertTrue(ok2, "tallyOf reverted");
+        (uint256 hits, uint256 last) = abi.decode(ret, (uint256, uint256));
+        assertEq(hits, 2, "untouched-then-bumped field lost an update");
+        assertEq(last, 22, "reconstructed field not last write");
+    }
+
+    /// ERC-7201-namespaced slots via comptime erc7201 + hash2 with raw
+    /// sload/sstore (the lib.ledger custody pattern): round-trip per key,
+    /// isolation across keys.
+    function test_probe_namespacedSlots() public {
+        (bool ok,) = p.call(abi.encodeWithSignature("nsWrite(uint256,uint256)", 5, 99));
+        assertTrue(ok, "nsWrite reverted");
+
+        (bool ok2, bytes memory ret) = p.call(abi.encodeWithSignature("nsRead(uint256)", 5));
+        assertTrue(ok2, "nsRead reverted");
+        assertEq(abi.decode(ret, (uint256)), 99, "namespaced round-trip lost the value");
+
+        (ok2, ret) = p.call(abi.encodeWithSignature("nsRead(uint256)", 6));
+        assertTrue(ok2, "nsRead(6) reverted");
+        assertEq(abi.decode(ret, (uint256)), 0, "unset namespaced key not zero");
+    }
 }
