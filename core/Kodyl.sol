@@ -10,12 +10,15 @@
 // an event is a payload-carrying ADT stored behind an id, "deployment" is a
 // state write, and the missing-event case is a constructor the type system
 // forces every consumer to handle. One consequence is shared custody: all
-// deposits live in one contract balance, tracked by a per-event ledger
-// (held) plus a global one (totalHeld), with the invariant
-// balance >= totalHeld asserted after every ETH movement. The direction is
-// >=, not ==: forced ETH (selfdestruct / block-reward payments) can push the
-// balance above the ledger and cannot be rejected, so == would let 1 wei
-// permanently brick every flow. The surplus is simply unowned and stuck.
+// deposits live in one contract balance, tracked by a per-event pot plus a
+// global ledger, with the invariant balance >= total asserted after every
+// ETH movement. The direction is >=, not ==: forced ETH (selfdestruct /
+// block-reward payments) can push the balance above the ledger and cannot
+// be rejected, so == would let 1 wei permanently brick every flow. The
+// surplus is simply unowned and stuck. The accounting itself lives in
+// lib.ledger, an opaque module whose only exports are credit / payOut plus
+// the two reads - raw pot mutation and raw ETH transfer are unreachable
+// from here by construction.
 import * from std;
 import {callvalue as callvalue_, shr, calldatasize, calldataload} from std.opcodes;
 import {frombool} from std;
@@ -24,6 +27,7 @@ import * from std.Generic;
 import * from std.StorageGeneric;
 import * from std.eip712;
 import * from lib.kodyl;
+import * from lib.ledger;
 
 // --- ADTs ---
 // Sums carry the cases and stay pattern-matched (exhaustiveness is the
@@ -56,16 +60,16 @@ enum EventRec { NoEvent, Ev(EventRecord) }
 
 // Per-event tallies behind the event id. A plain product lays out as
 // consecutive slots with NO tag word, so an unset id reads back as
-// Counters(0, 0, 0, 0) from the all-zero slots - the same zero-slot design
+// Counters(0, 0, 0) from the all-zero slots - the same zero-slot design
 // rule as NoEvent/None. Struct member writes through a mapping value are not
 // implemented at this pin (SC0231), so updates read the record and write a
 // whole reconstructed value - which is also the discipline that keeps the
-// four tallies moving together.
+// tallies moving together. The per-event POT is not here: money lives in
+// lib.ledger, behind its opaque credit/payOut boundary.
 struct Counters {
     registered: uint256;
     checkedIn: uint256;
     claimed: uint256;
-    held: uint256; // the per-event pot: deposits in, refunds/payouts/dust out
 }
 
 // --- ordinals (ADTs stay Solidity-compatible at the ABI boundary) ---
@@ -187,9 +191,9 @@ function domainSep() returns (bytes32) {
 contract Kodyl {
     maintainer: address;
     eventCount: uint256;
-    // Global deposit ledger: the contract balance must be at least this after
-    // every ETH movement (the singleton generalization of spec.md invariant 1).
-    totalHeld: uint256;
+    // No pot fields here: the per-event pot and the global deposit ledger
+    // (spec.md invariant 1) are lib.ledger's namespaced storage, reachable
+    // only through its credit / payOut / potOf / ledgerTotal exports.
 
     // Per-event state, keyed by eventId (1..eventCount; id 0 is never used,
     // so the NoEvent zero pattern is unreachable for real ids).
@@ -246,7 +250,7 @@ contract Kodyl {
 
     function maintainer() public returns (address) { return maintainer; }
     function eventCount() public returns (uint256) { return eventCount; }
-    function totalHeld() public returns (uint256) { return totalHeld; }
+    function totalHeld() public returns (uint256) { return ledgerTotal(); }
 
     // All seven parameters of an event in one call; reverts for unknown ids.
     function getEvent(eid: uint256)
@@ -311,8 +315,7 @@ contract Kodyl {
         return c.claimed;
     }
     function held(eid: uint256) public returns (uint256) {
-        let c: Counters = countersM[eid];
-        return c.held;
+        return potOf(eid);
     }
 
     function rewardPerAttendee(eid: uint256) public returns (uint256) {
@@ -391,11 +394,10 @@ contract Kodyl {
                 fail("EventFull()");
             }
             statusM[eid][caller()] = AttendeeStatus.Registered;
-            countersM[eid] = Counters(c.registered + 1, c.checkedIn, c.claimed,
-                                      addCk(c.held, rec.deposit));
-            totalHeld = addCk(totalHeld, rec.deposit);
-
-            solAssert(balanceSelf() >= totalHeld);
+            countersM[eid] = Counters(c.registered + 1, c.checkedIn, c.claimed);
+            // credit attributes the deposit to pot + total and asserts the
+            // balance invariant - the ledger's boundary, not this file's.
+            credit(eid, rec.deposit);
 
             emitLog3(keccakLit("Registered(uint256,address)"),
                      Typedef.rep(eid), Typedef.rep(caller()));
@@ -412,13 +414,8 @@ contract Kodyl {
 
             statusM[eid][caller()] = AttendeeStatus.Cancelled;
             let c: Counters = countersM[eid];
-            countersM[eid] = Counters(c.registered - 1, c.checkedIn, c.claimed,
-                                      subCk(c.held, rec.deposit));
-            totalHeld = subCk(totalHeld, rec.deposit);
-
-            sendValue(caller(), rec.deposit);
-
-            solAssert(balanceSelf() >= totalHeld);
+            countersM[eid] = Counters(c.registered - 1, c.checkedIn, c.claimed);
+            payOut(eid, caller(), rec.deposit);
 
             emitLog3(keccakLit("RegistrationCancelled(uint256,address)"),
                      Typedef.rep(eid), Typedef.rep(caller()));
@@ -445,13 +442,8 @@ contract Kodyl {
             requireStatus(statusM[eid][caller()], 1);
 
             statusM[eid][caller()] = AttendeeStatus.Cancelled;
-            countersM[eid] = Counters(c.registered - 1, c.checkedIn, c.claimed,
-                                      subCk(c.held, rec.deposit));
-            totalHeld = subCk(totalHeld, rec.deposit);
-
-            sendValue(caller(), rec.deposit);
-
-            solAssert(balanceSelf() >= totalHeld);
+            countersM[eid] = Counters(c.registered - 1, c.checkedIn, c.claimed);
+            payOut(eid, caller(), rec.deposit);
 
             emitLog3W1(keccakLit("RefundClaimed(uint256,address,uint256)"),
                        Typedef.rep(eid), Typedef.rep(caller()), Typedef.rep(rec.deposit));
@@ -471,18 +463,13 @@ contract Kodyl {
             let c: Counters = countersM[eid];
             let payout = addCk(rec.deposit, calcReward(c.registered, c.checkedIn, rec.deposit));
             // During normal settlement the pot always covers every remaining
-            // payout, so payout > held can only mean the pot was already
+            // payout, so payout > pot can only mean the pot was already
             // swept to the maintainer after DUST_CLAIM_TIMEOUT. Report that
-            // plainly instead of letting subCk underflow into an opaque
-            // Panic(0x11).
-            requireK(payout <= c.held, "PayoutSwept()");
-            countersM[eid] = Counters(c.registered, c.checkedIn, c.claimed + 1,
-                                      subCk(c.held, payout));
-            totalHeld = subCk(totalHeld, payout);
-
-            sendValue(caller(), payout);
-
-            solAssert(balanceSelf() >= totalHeld);
+            // plainly instead of letting the ledger's checked debit underflow
+            // into an opaque Panic(0x11).
+            requireK(payout <= potOf(eid), "PayoutSwept()");
+            countersM[eid] = Counters(c.registered, c.checkedIn, c.claimed + 1);
+            payOut(eid, caller(), payout);
 
             emitLog3W1(keccakLit("Claimed(uint256,address,uint256)"),
                        Typedef.rep(eid), Typedef.rep(caller()), Typedef.rep(payout));
@@ -506,16 +493,13 @@ contract Kodyl {
             let per = calcRebate(c.registered, c.checkedIn, rec.deposit);
             requireK(per != 0, "NothingToRebate()");
             requireStatus(statusM[eid][caller()], 1);
-            requireK(per <= c.held, "PayoutSwept()");
+            requireK(per <= potOf(eid), "PayoutSwept()");
 
             statusM[eid][caller()] = AttendeeStatus.Rebated;
-            countersM[eid] = Counters(c.registered, c.checkedIn, c.claimed,
-                                      subCk(c.held, per));
-            totalHeld = subCk(totalHeld, per);
-
-            sendValue(caller(), per);
-
-            solAssert(balanceSelf() >= totalHeld);
+            // The rebate touches no counter - registeredCount deliberately
+            // stays frozen - so the only state change besides the status is
+            // the ledger debit.
+            payOut(eid, caller(), per);
 
             emitLog3W1(keccakLit("RebateClaimed(uint256,address,uint256)"),
                        Typedef.rep(eid), Typedef.rep(caller()), Typedef.rep(per));
@@ -546,7 +530,7 @@ contract Kodyl {
     function bumpCheckedIn(eid: uint256, n: uint256) {
         if (n == 0) { return; }
         let c: Counters = countersM[eid];
-        countersM[eid] = Counters(c.registered, c.checkedIn + n, c.claimed, c.held);
+        countersM[eid] = Counters(c.registered, c.checkedIn + n, c.claimed);
     }
 
     function checkIn(eid: uint256, a: address) public returns (()) {
@@ -727,15 +711,11 @@ contract Kodyl {
                 fail("DustNotClaimable()");
             }
             // The per-event pot IS the dust once every claim is out; no
-            // reliance on the shared contract balance.
-            let dust = c.held;
+            // reliance on the shared contract balance. Draining it in full
+            // through payOut zeroes the pot - no counter changes here at all.
+            let dust = potOf(eid);
             requireK(dust != 0, "DustNotClaimable()");
-            countersM[eid] = Counters(c.registered, c.checkedIn, c.claimed, 0);
-            totalHeld = subCk(totalHeld, dust);
-
-            sendValue(maintainer, dust);
-
-            solAssert(balanceSelf() >= totalHeld);
+            payOut(eid, maintainer, dust);
 
             emitLog3W1(keccakLit("DustClaimed(uint256,address,uint256)"),
                        Typedef.rep(eid), Typedef.rep(maintainer), Typedef.rep(dust));

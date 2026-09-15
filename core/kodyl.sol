@@ -5,7 +5,7 @@
 // globals); the protocol itself lives in Kodyl.sol.
 import * from std;
 import {caller as caller_, callvalue as callvalue_, timestamp, selfbalance,
-        gas, call, shr, mload, mstore, revert_,
+        shr, mload, mstore, revert_,
         log1 as log1_, log2 as log2_, log3 as log3_,
         chainid as chainid_, address as address_} from std.opcodes;
 
@@ -29,7 +29,6 @@ export {
     revertWith2,
     revertStr,
     revertStr1,
-    sendValue,
     emitLog1,
     emitLog2,
     emitLog3,
@@ -280,12 +279,8 @@ function validateEventParams(
     }
 }
 
-// --- ETH transfer (weth9 pattern) ---
-
-function sendValue(dst: address, wad: uint256) {
-    let ret = call(gas(), Typedef.rep(dst), Typedef.rep(wad), 0, 0, 0, 0);
-    requireK(ret != 0, "TransferFailed()");
-}
+// (The ETH-transfer helper lives module-private in lib.ledger: every egress
+// routes through the ledger's payOut, so nothing else may hold the raw call.)
 
 // --- event emission (no emit sugar in the language) ---
 // Generic over topics: callers pass raw words (Typedef.rep their values) and
