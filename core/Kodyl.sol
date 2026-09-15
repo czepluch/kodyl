@@ -26,6 +26,9 @@ import * from std.eip712;
 import * from lib.kodyl;
 
 // --- ADTs ---
+// Sums carry the cases and stay pattern-matched (exhaustiveness is the
+// point); wide products carry names. Positional destructuring of seven
+// fields - five of them uint256 - was a silent-swap hazard the names remove.
 
 // Lifecycle state, derived from timestamps (never stored).
 enum State { Registration, Active, Dispute, Settled, Cancelled }
@@ -34,22 +37,36 @@ enum State { Registration, Active, Dispute, Settled, Cancelled }
 // key (the all-zero slot pattern) reads back as None.
 enum AttendeeStatus { None, Registered, Cancelled, CheckedIn, Claimed, Rebated }
 
-// An event: either absent, or its immutable parameters. NoEvent is first so
-// an unset id reads back as NoEvent, and exhaustive matching forces every
-// function to decide what a missing event means.
-// Fields: organizer, depositAmount, cancellationDeadline, eventStart,
-//         eventEnd, disputePeriod, maxAttendees (0 = unlimited).
-enum EventRec {
-    NoEvent,
-    Ev(address, uint256, uint256, uint256, uint256, uint256, uint256)
+// The immutable parameters of an event, set once at creation.
+struct EventRecord {
+    organizer: address;
+    deposit: uint256;
+    cancellationDeadline: uint256;
+    eventStart: uint256;
+    eventEnd: uint256;
+    disputePeriod: uint256;
+    maxAttendees: uint256; // 0 = unlimited
 }
 
-// Per-event tallies as one product value behind the event id. Fields, in
-// order: registered, checkedIn, claimed, held. A single-constructor
-// product lays out as consecutive slots with NO tag word, so an unset id
-// reads back as Counters(0, 0, 0, 0) from the all-zero slots - the same
-// zero-slot design rule as NoEvent/None.
-enum Counters { Counters(uint256, uint256, uint256, uint256) }
+// An event: either absent, or its record. NoEvent is first so an unset id
+// reads back as NoEvent, and exhaustive matching forces every function to
+// decide what a missing event means. Storage layout: tag word + the record's
+// fields, identical to the previous positional payload.
+enum EventRec { NoEvent, Ev(EventRecord) }
+
+// Per-event tallies behind the event id. A plain product lays out as
+// consecutive slots with NO tag word, so an unset id reads back as
+// Counters(0, 0, 0, 0) from the all-zero slots - the same zero-slot design
+// rule as NoEvent/None. Struct member writes through a mapping value are not
+// implemented at this pin (SC0231), so updates read the record and write a
+// whole reconstructed value - which is also the discipline that keeps the
+// four tallies moving together.
+struct Counters {
+    registered: uint256;
+    checkedIn: uint256;
+    claimed: uint256;
+    held: uint256; // the per-event pot: deposits in, refunds/payouts/dust out
+}
 
 // --- ordinals (ADTs stay Solidity-compatible at the ABI boundary) ---
 
@@ -75,13 +92,12 @@ function statusOrd(s: AttendeeStatus) returns (uint256) {
 }
 
 // Pure state derivation: cancellation dominates, otherwise the clock decides.
-function deriveState(isCancelled: bool, eventStart: uint256, eventEnd: uint256,
-                     disputePeriod: uint256) returns (State) {
+function deriveState(isCancelled: bool, rec: EventRecord) returns (State) {
     if (isCancelled) { return State.Cancelled; }
     let t = timeNow();
-    if (t < eventStart) { return State.Registration; }
-    if (t <= eventEnd) { return State.Active; }
-    if (t <= addCk(eventEnd, disputePeriod)) { return State.Dispute; }
+    if (t < rec.eventStart) { return State.Registration; }
+    if (t <= rec.eventEnd) { return State.Active; }
+    if (t <= addCk(rec.eventEnd, rec.disputePeriod)) { return State.Dispute; }
     return State.Settled;
 }
 
@@ -93,9 +109,8 @@ function revertNotFound() {
 // (rather than a raw time window) also rejects check-ins on a cancelled event,
 // where the state is Cancelled - otherwise an attendee could be flipped to
 // CheckedIn and then never recover their deposit.
-function requireCheckInOpen(isCancelled: bool, start: uint256, end_: uint256,
-                            dispute: uint256) {
-    let s = stateOrd(deriveState(isCancelled, start, end_, dispute));
+function requireCheckInOpen(isCancelled: bool, rec: EventRecord) {
+    let s = stateOrd(deriveState(isCancelled, rec));
     if (s != 1 && s != 2) {
         fail("CheckInWindowClosed()");
     }
@@ -184,9 +199,6 @@ contract Kodyl {
     metadataUris: array<string>;
     cancelledM: mapping(uint256 => bool);
     statusM: mapping(uint256 => mapping(address => AttendeeStatus));
-    // Per-event tallies (Counters above). The held field is the per-event
-    // pot: deposits in, refunds/payouts/dust out. Makes dust exact per event
-    // instead of relying on the (shared) contract balance.
     countersM: mapping(uint256 => Counters);
     // Door operators authorized to countersign Presence proofs, per event.
     // The zero slot reads false (not operator) - the zero-pattern rule.
@@ -219,8 +231,8 @@ contract Kodyl {
 
         let eid = eventCount + 1;
         eventCount = eid;
-        eventsRec[eid] = EventRec.Ev(caller(), depositAmount, cancellationDeadline,
-                                     eventStart, eventEnd, disputePeriod, maxAttendees);
+        eventsRec[eid] = EventRec.Ev(EventRecord(caller(), depositAmount, cancellationDeadline,
+                                                 eventStart, eventEnd, disputePeriod, maxAttendees));
         metadataUris.push(metadataURI_);
 
         emitLog3W3(keccakLit("EventCreated(uint256,address,uint256,uint256,uint256)"),
@@ -244,8 +256,9 @@ contract Kodyl {
             revertNotFound();
             return (address(0), 0, 0, 0, 0, 0, 0);
         }
-        case EventRec.Ev(org, dep, deadline, start, end_, dispute, cap) {
-            return (org, dep, deadline, start, end_, dispute, cap);
+        case EventRec.Ev(rec) {
+            return (rec.organizer, rec.deposit, rec.cancellationDeadline, rec.eventStart,
+                    rec.eventEnd, rec.disputePeriod, rec.maxAttendees);
         }
         }
     }
@@ -253,15 +266,15 @@ contract Kodyl {
     function organizer(eid: uint256) public returns (address) {
         match (eventsRec[eid]) {
         case EventRec.NoEvent { revertNotFound(); return address(0); }
-        case EventRec.Ev(org, dep, deadline, start, end_, dispute, cap) { return org; }
+        case EventRec.Ev(rec) { return rec.organizer; }
         }
     }
 
     function getState(eid: uint256) public returns (uint256) {
         match (eventsRec[eid]) {
         case EventRec.NoEvent { revertNotFound(); return 0; }
-        case EventRec.Ev(org, dep, deadline, start, end_, dispute, cap) {
-            return stateOrd(deriveState(cancelledM[eid], start, end_, dispute));
+        case EventRec.Ev(rec) {
+            return stateOrd(deriveState(cancelledM[eid], rec));
         }
         }
     }
@@ -275,7 +288,7 @@ contract Kodyl {
         // Index literals stay cast: array indexing is generic over the index
         // type, so a bare 0 leaves it ambiguous.
         case EventRec.NoEvent { revertNotFound(); return metadataUris[uint256(0)]; }
-        case EventRec.Ev(org, dep, deadline, start, end_, dispute, cap) {
+        case EventRec.Ev(rec) {
             return metadataUris[eid - 1];
         }
         }
@@ -284,27 +297,30 @@ contract Kodyl {
     function cancelled(eid: uint256) public returns (bool) { return cancelledM[eid]; }
 
     // Counter getters keep their per-field signatures; each projects one
-    // field out of the product (unknown id: the zero record, so 0).
+    // field out of the record (unknown id: the zero record, so 0).
     function registeredCount(eid: uint256) public returns (uint256) {
-        match (countersM[eid]) { case Counters(reg, chk, clm, hld) { return reg; } }
+        let c: Counters = countersM[eid];
+        return c.registered;
     }
     function checkedInCount(eid: uint256) public returns (uint256) {
-        match (countersM[eid]) { case Counters(reg, chk, clm, hld) { return chk; } }
+        let c: Counters = countersM[eid];
+        return c.checkedIn;
     }
     function claimedCount(eid: uint256) public returns (uint256) {
-        match (countersM[eid]) { case Counters(reg, chk, clm, hld) { return clm; } }
+        let c: Counters = countersM[eid];
+        return c.claimed;
     }
     function held(eid: uint256) public returns (uint256) {
-        match (countersM[eid]) { case Counters(reg, chk, clm, hld) { return hld; } }
+        let c: Counters = countersM[eid];
+        return c.held;
     }
 
     function rewardPerAttendee(eid: uint256) public returns (uint256) {
         match (eventsRec[eid]) {
         case EventRec.NoEvent { revertNotFound(); return 0; }
-        case EventRec.Ev(org, dep, deadline, start, end_, dispute, cap) {
-            match (countersM[eid]) {
-            case Counters(reg, chk, clm, hld) { return calcReward(reg, chk, dep); }
-            }
+        case EventRec.Ev(rec) {
+            let c: Counters = countersM[eid];
+            return calcReward(c.registered, c.checkedIn, rec.deposit);
         }
         }
     }
@@ -314,10 +330,9 @@ contract Kodyl {
     function noShowRebate(eid: uint256) public returns (uint256) {
         match (eventsRec[eid]) {
         case EventRec.NoEvent { revertNotFound(); return 0; }
-        case EventRec.Ev(org, dep, deadline, start, end_, dispute, cap) {
-            match (countersM[eid]) {
-            case Counters(reg, chk, clm, hld) { return calcRebate(reg, chk, dep); }
-            }
+        case EventRec.Ev(rec) {
+            let c: Counters = countersM[eid];
+            return calcRebate(c.registered, c.checkedIn, rec.deposit);
         }
         }
     }
@@ -326,7 +341,7 @@ contract Kodyl {
     // capped at rewardCapMultiple() * deposit: attendance is a bounded bonus,
     // not a lottery, so a checked-in sybil can extract at most the cap however
     // many honest registrations it farms. Takes the tallies as arguments:
-    // callers already hold a Counters binding and must not re-read the mapping.
+    // callers already hold a Counters value and must not re-read the mapping.
     function calcReward(reg: uint256, chk: uint256, dep: uint256) returns (uint256) {
         if (chk == 0) { return 0; }
         let noShow = subCk(reg, chk);
@@ -363,24 +378,22 @@ contract Kodyl {
     function register(eid: uint256) public payable returns (()) {
         match (eventsRec[eid]) {
         case EventRec.NoEvent { revertNotFound(); }
-        case EventRec.Ev(org, dep, deadline, start, end_, dispute, cap) {
-            requireK(stateOrd(deriveState(cancelledM[eid], start, end_, dispute)) == 0,
+        case EventRec.Ev(rec) {
+            requireK(stateOrd(deriveState(cancelledM[eid], rec)) == 0,
                      "RegistrationClosed()");
             registerGuard(statusM[eid][caller()]);
-            if (caller_value() != dep) {
+            if (caller_value() != rec.deposit) {
                 revertWith2("IncorrectDeposit(uint256,uint256)",
-                            Typedef.rep(dep), Typedef.rep(caller_value()));
+                            Typedef.rep(rec.deposit), Typedef.rep(caller_value()));
             }
-            match (countersM[eid]) {
-            case Counters(reg, chk, clm, hld) {
-                if (cap > 0 && reg >= cap) {
-                    fail("EventFull()");
-                }
-                statusM[eid][caller()] = AttendeeStatus.Registered;
-                countersM[eid] = Counters(reg + 1, chk, clm, addCk(hld, dep));
+            let c: Counters = countersM[eid];
+            if (rec.maxAttendees > 0 && c.registered >= rec.maxAttendees) {
+                fail("EventFull()");
             }
-            }
-            totalHeld = addCk(totalHeld, dep);
+            statusM[eid][caller()] = AttendeeStatus.Registered;
+            countersM[eid] = Counters(c.registered + 1, c.checkedIn, c.claimed,
+                                      addCk(c.held, rec.deposit));
+            totalHeld = addCk(totalHeld, rec.deposit);
 
             solAssert(balanceSelf() >= totalHeld);
 
@@ -393,19 +406,17 @@ contract Kodyl {
     function cancel(eid: uint256) public returns (()) {
         match (eventsRec[eid]) {
         case EventRec.NoEvent { revertNotFound(); }
-        case EventRec.Ev(org, dep, deadline, start, end_, dispute, cap) {
-            requireK(timeNow() <= deadline, "CancellationDeadlinePassed()");
+        case EventRec.Ev(rec) {
+            requireK(timeNow() <= rec.cancellationDeadline, "CancellationDeadlinePassed()");
             requireStatus(statusM[eid][caller()], 1);
 
             statusM[eid][caller()] = AttendeeStatus.Cancelled;
-            match (countersM[eid]) {
-            case Counters(reg, chk, clm, hld) {
-                countersM[eid] = Counters(reg - 1, chk, clm, subCk(hld, dep));
-            }
-            }
-            totalHeld = subCk(totalHeld, dep);
+            let c: Counters = countersM[eid];
+            countersM[eid] = Counters(c.registered - 1, c.checkedIn, c.claimed,
+                                      subCk(c.held, rec.deposit));
+            totalHeld = subCk(totalHeld, rec.deposit);
 
-            sendValue(caller(), dep);
+            sendValue(caller(), rec.deposit);
 
             solAssert(balanceSelf() >= totalHeld);
 
@@ -425,27 +436,25 @@ contract Kodyl {
     function claimRefund(eid: uint256) public returns (()) {
         match (eventsRec[eid]) {
         case EventRec.NoEvent { revertNotFound(); }
-        case EventRec.Ev(org, dep, deadline, start, end_, dispute, cap) {
-            match (countersM[eid]) {
-            case Counters(reg, chk, clm, hld) {
-                let wasCancelled = cancelledM[eid];
-                let abandoned =
-                    stateOrd(deriveState(wasCancelled, start, end_, dispute)) == 3 && chk == 0;
-                requireK(wasCancelled || abandoned, "EventNotCancelled()");
-                requireStatus(statusM[eid][caller()], 1);
+        case EventRec.Ev(rec) {
+            let c: Counters = countersM[eid];
+            let wasCancelled = cancelledM[eid];
+            let abandoned =
+                stateOrd(deriveState(wasCancelled, rec)) == 3 && c.checkedIn == 0;
+            requireK(wasCancelled || abandoned, "EventNotCancelled()");
+            requireStatus(statusM[eid][caller()], 1);
 
-                statusM[eid][caller()] = AttendeeStatus.Cancelled;
-                countersM[eid] = Counters(reg - 1, chk, clm, subCk(hld, dep));
-                totalHeld = subCk(totalHeld, dep);
+            statusM[eid][caller()] = AttendeeStatus.Cancelled;
+            countersM[eid] = Counters(c.registered - 1, c.checkedIn, c.claimed,
+                                      subCk(c.held, rec.deposit));
+            totalHeld = subCk(totalHeld, rec.deposit);
 
-                sendValue(caller(), dep);
+            sendValue(caller(), rec.deposit);
 
-                solAssert(balanceSelf() >= totalHeld);
+            solAssert(balanceSelf() >= totalHeld);
 
-                emitLog3W1(keccakLit("RefundClaimed(uint256,address,uint256)"),
-                           Typedef.rep(eid), Typedef.rep(caller()), Typedef.rep(dep));
-            }
-            }
+            emitLog3W1(keccakLit("RefundClaimed(uint256,address,uint256)"),
+                       Typedef.rep(eid), Typedef.rep(caller()), Typedef.rep(rec.deposit));
         }
         }
     }
@@ -453,32 +462,30 @@ contract Kodyl {
     function claim(eid: uint256) public returns (()) {
         match (eventsRec[eid]) {
         case EventRec.NoEvent { revertNotFound(); }
-        case EventRec.Ev(org, dep, deadline, start, end_, dispute, cap) {
-            requireK(stateOrd(deriveState(cancelledM[eid], start, end_, dispute)) == 3,
+        case EventRec.Ev(rec) {
+            requireK(stateOrd(deriveState(cancelledM[eid], rec)) == 3,
                      "NotSettled()");
             requireStatus(statusM[eid][caller()], 3);
 
             statusM[eid][caller()] = AttendeeStatus.Claimed;
-            match (countersM[eid]) {
-            case Counters(reg, chk, clm, hld) {
-                let payout = addCk(dep, calcReward(reg, chk, dep));
-                // During normal settlement the pot always covers every
-                // remaining payout, so payout > held can only mean the pot
-                // was already swept to the maintainer after
-                // DUST_CLAIM_TIMEOUT. Report that plainly instead of letting
-                // subCk underflow into an opaque Panic(0x11).
-                requireK(payout <= hld, "PayoutSwept()");
-                countersM[eid] = Counters(reg, chk, clm + 1, subCk(hld, payout));
-                totalHeld = subCk(totalHeld, payout);
+            let c: Counters = countersM[eid];
+            let payout = addCk(rec.deposit, calcReward(c.registered, c.checkedIn, rec.deposit));
+            // During normal settlement the pot always covers every remaining
+            // payout, so payout > held can only mean the pot was already
+            // swept to the maintainer after DUST_CLAIM_TIMEOUT. Report that
+            // plainly instead of letting subCk underflow into an opaque
+            // Panic(0x11).
+            requireK(payout <= c.held, "PayoutSwept()");
+            countersM[eid] = Counters(c.registered, c.checkedIn, c.claimed + 1,
+                                      subCk(c.held, payout));
+            totalHeld = subCk(totalHeld, payout);
 
-                sendValue(caller(), payout);
+            sendValue(caller(), payout);
 
-                solAssert(balanceSelf() >= totalHeld);
+            solAssert(balanceSelf() >= totalHeld);
 
-                emitLog3W1(keccakLit("Claimed(uint256,address,uint256)"),
-                           Typedef.rep(eid), Typedef.rep(caller()), Typedef.rep(payout));
-            }
-            }
+            emitLog3W1(keccakLit("Claimed(uint256,address,uint256)"),
+                       Typedef.rep(eid), Typedef.rep(caller()), Typedef.rep(payout));
         }
         }
     }
@@ -492,28 +499,26 @@ contract Kodyl {
     function claimNoShowRebate(eid: uint256) public returns (()) {
         match (eventsRec[eid]) {
         case EventRec.NoEvent { revertNotFound(); }
-        case EventRec.Ev(org, dep, deadline, start, end_, dispute, cap) {
-            requireK(stateOrd(deriveState(cancelledM[eid], start, end_, dispute)) == 3,
+        case EventRec.Ev(rec) {
+            requireK(stateOrd(deriveState(cancelledM[eid], rec)) == 3,
                      "NotSettled()");
-            match (countersM[eid]) {
-            case Counters(reg, chk, clm, hld) {
-                let per = calcRebate(reg, chk, dep);
-                requireK(per != 0, "NothingToRebate()");
-                requireStatus(statusM[eid][caller()], 1);
-                requireK(per <= hld, "PayoutSwept()");
+            let c: Counters = countersM[eid];
+            let per = calcRebate(c.registered, c.checkedIn, rec.deposit);
+            requireK(per != 0, "NothingToRebate()");
+            requireStatus(statusM[eid][caller()], 1);
+            requireK(per <= c.held, "PayoutSwept()");
 
-                statusM[eid][caller()] = AttendeeStatus.Rebated;
-                countersM[eid] = Counters(reg, chk, clm, subCk(hld, per));
-                totalHeld = subCk(totalHeld, per);
+            statusM[eid][caller()] = AttendeeStatus.Rebated;
+            countersM[eid] = Counters(c.registered, c.checkedIn, c.claimed,
+                                      subCk(c.held, per));
+            totalHeld = subCk(totalHeld, per);
 
-                sendValue(caller(), per);
+            sendValue(caller(), per);
 
-                solAssert(balanceSelf() >= totalHeld);
+            solAssert(balanceSelf() >= totalHeld);
 
-                emitLog3W1(keccakLit("RebateClaimed(uint256,address,uint256)"),
-                           Typedef.rep(eid), Typedef.rep(caller()), Typedef.rep(per));
-            }
-            }
+            emitLog3W1(keccakLit("RebateClaimed(uint256,address,uint256)"),
+                       Typedef.rep(eid), Typedef.rep(caller()), Typedef.rep(per));
         }
         }
     }
@@ -540,19 +545,16 @@ contract Kodyl {
     // pay a redundant same-value 4-slot write).
     function bumpCheckedIn(eid: uint256, n: uint256) {
         if (n == 0) { return; }
-        match (countersM[eid]) {
-        case Counters(reg, chk, clm, hld) {
-            countersM[eid] = Counters(reg, chk + n, clm, hld);
-        }
-        }
+        let c: Counters = countersM[eid];
+        countersM[eid] = Counters(c.registered, c.checkedIn + n, c.claimed, c.held);
     }
 
     function checkIn(eid: uint256, a: address) public returns (()) {
         match (eventsRec[eid]) {
         case EventRec.NoEvent { revertNotFound(); }
-        case EventRec.Ev(org, dep, deadline, start, end_, dispute, cap) {
-            onlyOrganizerOf(org);
-            requireCheckInOpen(cancelledM[eid], start, end_, dispute);
+        case EventRec.Ev(rec) {
+            onlyOrganizerOf(rec.organizer);
+            requireCheckInOpen(cancelledM[eid], rec);
             bumpCheckedIn(eid, checkInInner(eid, a));
         }
         }
@@ -567,8 +569,8 @@ contract Kodyl {
     function setOperator(eid: uint256, operator: address, enabled: bool) public returns (()) {
         match (eventsRec[eid]) {
         case EventRec.NoEvent { revertNotFound(); }
-        case EventRec.Ev(org, dep, deadline, start, end_, dispute, cap) {
-            onlyOrganizerOf(org);
+        case EventRec.Ev(rec) {
+            onlyOrganizerOf(rec.organizer);
             operatorsM[eid][operator] = enabled;
             emitLog3W1(keccakLit("OperatorSet(uint256,address,bool)"),
                        Typedef.rep(eid), Typedef.rep(operator), frombool(enabled));
@@ -622,9 +624,9 @@ contract Kodyl {
                               ticketSig: memory<bytes>, presenceSig: memory<bytes>) public returns (()) {
         match (eventsRec[eid]) {
         case EventRec.NoEvent { revertNotFound(); }
-        case EventRec.Ev(org, dep, deadline, start, end_, dispute, cap) {
-            requireCheckInOpen(cancelledM[eid], start, end_, dispute);
-            verifyProof(eid, org, domainSep(), attendee, ticketSig, presenceSig);
+        case EventRec.Ev(rec) {
+            requireCheckInOpen(cancelledM[eid], rec);
+            verifyProof(eid, rec.organizer, domainSep(), attendee, ticketSig, presenceSig);
             bumpCheckedIn(eid, checkInInner(eid, attendee));
         }
         }
@@ -648,8 +650,8 @@ contract Kodyl {
     ) public returns (()) {
         match (eventsRec[eid]) {
         case EventRec.NoEvent { revertNotFound(); }
-        case EventRec.Ev(org, dep, deadline, start, end_, dispute, cap) {
-            requireCheckInOpen(cancelledM[eid], start, end_, dispute);
+        case EventRec.Ev(rec) {
+            requireCheckInOpen(cancelledM[eid], rec);
             let n = toCheck.length();
             requireK(ticketSigs.length() == n, "ProofArrayMismatch()");
             requireK(presenceSigs.length() == n, "ProofArrayMismatch()");
@@ -664,7 +666,7 @@ contract Kodyl {
                 // check and address decode each time, so toCheck[i] twice is
                 // wasted work.
                 let who = toCheck[i];
-                verifyProof(eid, org, dom, who, ticketSigs[i], presenceSigs[i]);
+                verifyProof(eid, rec.organizer, dom, who, ticketSigs[i], presenceSigs[i]);
                 flips = flips + checkInInner(eid, who);
             }
             bumpCheckedIn(eid, flips);
@@ -675,9 +677,9 @@ contract Kodyl {
     function cancelEvent(eid: uint256) public returns (()) {
         match (eventsRec[eid]) {
         case EventRec.NoEvent { revertNotFound(); }
-        case EventRec.Ev(org, dep, deadline, start, end_, dispute, cap) {
-            onlyOrganizerOf(org);
-            requireK(stateOrd(deriveState(cancelledM[eid], start, end_, dispute)) == 0,
+        case EventRec.Ev(rec) {
+            onlyOrganizerOf(rec.organizer);
+            requireK(stateOrd(deriveState(cancelledM[eid], rec)) == 0,
                      "EventAlreadyStarted()");
             cancelledM[eid] = true;
             emitLog2(keccakLit("EventCancelled(uint256)"), Typedef.rep(eid));
@@ -688,8 +690,8 @@ contract Kodyl {
     function setMetadataURI(eid: uint256, newUri: memory<string>) public returns (()) {
         match (eventsRec[eid]) {
         case EventRec.NoEvent { revertNotFound(); }
-        case EventRec.Ev(org, dep, deadline, start, end_, dispute, cap) {
-            onlyOrganizerOf(org);
+        case EventRec.Ev(rec) {
+            onlyOrganizerOf(rec.organizer);
             metadataUris[eid - 1] = newUri;
             emitLog2Str(keccakLit("MetadataUpdated(uint256,string)"),
                         Typedef.rep(eid), newUri);
@@ -702,42 +704,41 @@ contract Kodyl {
     function claimDust(eid: uint256) public returns (()) {
         match (eventsRec[eid]) {
         case EventRec.NoEvent { revertNotFound(); }
-        case EventRec.Ev(org, dep, deadline, start, end_, dispute, cap) {
-            requireK(stateOrd(deriveState(cancelledM[eid], start, end_, dispute)) == 3,
+        case EventRec.Ev(rec) {
+            requireK(stateOrd(deriveState(cancelledM[eid], rec)) == 3,
                      "NotSettled()");
-            match (countersM[eid]) {
-            case Counters(reg, chk, clm, hld) {
-                // A zero-check-in settlement is abandonment, not dust: the pot
-                // is exactly the attributed deposits and belongs to claimRefund
-                // (which never expires), so there is no sweep - mirroring
-                // cancelled events. Without this gate the vacuous 0 == 0
-                // "all claimed" would let the maintainer race the refunds.
-                requireK(chk != 0, "DustNotClaimable()");
-                // When the reward cap leaves a rebate pool, the early
-                // "all claimed" door stays shut - there is no rebated-count
-                // tally, so before the timeout the pot may still owe
-                // no-shows their rebates. The 30-day sweep then takes
-                // whatever rebates went unclaimed, like unclaimed payouts.
-                let allClaimed = clm == chk && calcRebate(reg, chk, dep) == 0;
-                let timeoutPassed = timeNow() > addCk(addCk(end_, dispute), dustClaimTimeout());
-                if (!allClaimed && !timeoutPassed) {
-                    fail("DustNotClaimable()");
-                }
-                // The per-event pot IS the dust once every claim is out; no
-                // reliance on the shared contract balance.
-                let dust = hld;
-                requireK(dust != 0, "DustNotClaimable()");
-                countersM[eid] = Counters(reg, chk, clm, 0);
-                totalHeld = subCk(totalHeld, dust);
-
-                sendValue(maintainer, dust);
-
-                solAssert(balanceSelf() >= totalHeld);
-
-                emitLog3W1(keccakLit("DustClaimed(uint256,address,uint256)"),
-                           Typedef.rep(eid), Typedef.rep(maintainer), Typedef.rep(dust));
+            let c: Counters = countersM[eid];
+            // A zero-check-in settlement is abandonment, not dust: the pot
+            // is exactly the attributed deposits and belongs to claimRefund
+            // (which never expires), so there is no sweep - mirroring
+            // cancelled events. Without this gate the vacuous 0 == 0
+            // "all claimed" would let the maintainer race the refunds.
+            requireK(c.checkedIn != 0, "DustNotClaimable()");
+            // When the reward cap leaves a rebate pool, the early
+            // "all claimed" door stays shut - there is no rebated-count
+            // tally, so before the timeout the pot may still owe
+            // no-shows their rebates. The 30-day sweep then takes
+            // whatever rebates went unclaimed, like unclaimed payouts.
+            let allClaimed = c.claimed == c.checkedIn
+                && calcRebate(c.registered, c.checkedIn, rec.deposit) == 0;
+            let timeoutPassed = timeNow() > addCk(addCk(rec.eventEnd, rec.disputePeriod),
+                                                  dustClaimTimeout());
+            if (!allClaimed && !timeoutPassed) {
+                fail("DustNotClaimable()");
             }
-            }
+            // The per-event pot IS the dust once every claim is out; no
+            // reliance on the shared contract balance.
+            let dust = c.held;
+            requireK(dust != 0, "DustNotClaimable()");
+            countersM[eid] = Counters(c.registered, c.checkedIn, c.claimed, 0);
+            totalHeld = subCk(totalHeld, dust);
+
+            sendValue(maintainer, dust);
+
+            solAssert(balanceSelf() >= totalHeld);
+
+            emitLog3W1(keccakLit("DustClaimed(uint256,address,uint256)"),
+                       Typedef.rep(eid), Typedef.rep(maintainer), Typedef.rep(dust));
         }
         }
     }
@@ -769,9 +770,9 @@ contract Kodyl {
         let eid = uint256(calldataload(4));
         match (eventsRec[eid]) {
         case EventRec.NoEvent { revertNotFound(); }
-        case EventRec.Ev(org, dep, deadline, start, end_, dispute, cap) {
-            onlyOrganizerOf(org);
-            requireCheckInOpen(cancelledM[eid], start, end_, dispute);
+        case EventRec.Ev(rec) {
+            onlyOrganizerOf(rec.organizer);
+            requireCheckInOpen(cancelledM[eid], rec);
             let lenPtr = 4 + calldataload(36); // second arg head holds the array offset
             let len = calldataload(lenPtr);
             // len is a raw calldata word, so unwrap the cap once for both the
