@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Compile Core Solidity sources in core/ to deployable bytecode.
 #
-# Pipeline per contract: sol-core (.solc -> .hull) -> yule (.hull -> .yul)
+# Pipeline per contract: sol-core (.sol -> .hull) -> yule (.hull -> .yul)
 #                        -> solc --strict-assembly (.yul -> hex initcode)
 #
 # The toolchain lives in toolchain/ (machine-local, gitignored): GC-rooted nix
@@ -41,14 +41,14 @@ files=("$@")
 if [ ${#files[@]} -eq 0 ]; then
     # Probe first: it is the toolchain canary, so drift fails on the small
     # labeled contract before Kodyl does.
-    files=("$CORE/Probe.solc")
-    for f in "$CORE"/*.solc; do
-        [ "$f" = "$CORE/Probe.solc" ] || files+=("$f")
+    files=("$CORE/Probe.sol")
+    for f in "$CORE"/*.sol; do
+        [ "$f" = "$CORE/Probe.sol" ] || files+=("$f")
     done
 fi
 
 for f in "${files[@]}"; do
-    base="$(basename "$f" .solc)"
+    base="$(basename "$f" .sol)"
     # Shared modules (no contract declaration) are compiled via their importers.
     if ! grep -q '^contract ' "$f"; then
         echo "== $base (module, skipped)"

@@ -1,13 +1,13 @@
 // Shared helpers for the Kodyl Core Solidity implementation, imported as
-// `import lib.kodyl.{*};`. Each definition here is a piece of infrastructure
-// the language does not provide yet (checked math, error selectors and revert
-// builders, event codegen, named constants, env globals); the protocol itself
-// lives in Kodyl.solc.
-import std.{*};
-import std.opcodes.{caller as caller_, callvalue as callvalue_, timestamp, selfbalance,
-                    gas, call, shr, mload, mstore, revert as revert_,
-                    log1 as log1_, log2 as log2_, log3 as log3_,
-                    chainid as chainid_, address as address_};
+// `import * from lib.kodyl;`. Each definition here is a piece of
+// infrastructure the language does not provide yet (checked math, error
+// selectors and revert builders, event codegen, named constants, env
+// globals); the protocol itself lives in Kodyl.sol.
+import * from std;
+import {caller as caller_, callvalue as callvalue_, timestamp, selfbalance,
+        gas, call, shr, mload, mstore, revert_,
+        log1 as log1_, log2 as log2_, log3 as log3_,
+        chainid as chainid_, address as address_} from std.opcodes;
 
 export {
     ErrSel,
@@ -49,25 +49,25 @@ export {
 // source of truth; every consumer calls these instead of repeating literals.
 
 // Hard cap on a checkInBatch array length.
-function maxBatchSize() -> uint256 { return 100; }
+function maxBatchSize() returns (uint256) { return 100; }
 
 // 30 days after the dispute window: unclaimed payouts sweep to the maintainer.
-function dustClaimTimeout() -> uint256 { return 2592000; }
+function dustClaimTimeout() returns (uint256) { return 2592000; }
 
 // 2 hours: minimum gap between the cancellation deadline and event start.
-function minCancellationBuffer() -> uint256 { return 7200; }
+function minCancellationBuffer() returns (uint256) { return 7200; }
 
 // Attendance reward ceiling, as a multiple of the deposit: showing up can at
 // most double your stake. Bounds what a checked-in sybil can capture - the
 // excess above the cap rebates to the no-shows instead (see calcRebate).
-function rewardCapMultiple() -> uint256 { return 1; }
+function rewardCapMultiple() returns (uint256) { return 1; }
 
 // 1 hour: shortest allowed dispute period.
-function disputePeriodMin() -> uint256 { return 3600; }
+function disputePeriodMin() returns (uint256) { return 3600; }
 
 // 30 days: longest allowed dispute period. Equal to dustClaimTimeout by
 // coincidence only - the two must stay separate.
-function disputePeriodMax() -> uint256 { return 2592000; }
+function disputePeriodMax() returns (uint256) { return 2592000; }
 
 // --- error selectors ---
 // An error signature literal at an ErrSel-typed position folds to its
@@ -75,104 +75,100 @@ function disputePeriodMax() -> uint256 { return 2592000; }
 // of fromString), so error sites read fail("X()") with no hash constants in
 // source.
 
-data ErrSel = ErrSel(word);
+enum ErrSel { ErrSel(word) }
 
-instance ErrSel : Str {
-    function fromString(s : string) -> ErrSel {
+impl Str<ErrSel> {
+    function fromString(s: string) returns (ErrSel) {
         return ErrSel(shr(224, keccakLit(s)));
     }
 }
 
 // Unconditional zero-arg custom-error revert.
-function fail(e : ErrSel) -> () {
-    match e {
-    | ErrSel(w) => require(false, Error(w));
+function fail(e: ErrSel) {
+    match (e) {
+    case ErrSel(w) { require(false, Error(w)); }
     }
 }
 
 // require with a zero-arg custom error. No short-circuit in the language, so
 // callers must not fold compound guards into cond casually.
-function requireK(cond : bool, e : ErrSel) -> () {
-    match e {
-    | ErrSel(w) => require(cond, Error(w));
+function requireK(cond: bool, e: ErrSel) {
+    match (e) {
+    case ErrSel(w) { require(cond, Error(w)); }
     }
 }
 
 // --- environment ---
 
-function caller() -> address {
+function caller() returns (address) {
     return address(caller_());
 }
 
-function caller_value() -> uint256 {
+function caller_value() returns (uint256) {
     return uint256(callvalue_());
 }
 
-function timeNow() -> uint256 {
+function timeNow() returns (uint256) {
     return uint256(timestamp());
 }
 
-function balanceSelf() -> uint256 {
+function balanceSelf() returns (uint256) {
     return uint256(selfbalance());
 }
 
-function chainId() -> uint256 {
+function chainId() returns (uint256) {
     return uint256(chainid_());
 }
 
-function self() -> address {
+function self() returns (address) {
     return address(address_());
 }
 
-// ecrecover with the scratch slot zeroed first. std ecrecover reads its
-// result from scratch [0, 32) but does NOT pre-zero it, and the precompile
-// writes NOTHING on an invalid recovery (v outside {27, 28}, or an r/s that
-// recovers no point - the malleability guard only screens s). The EVM leaves
-// the return region untouched, so std ecrecover would read back a stale
-// scratch word as the "signer" instead of reverting ECRecoverFailed. Zeroing
-// [0, 32) first turns every invalid recovery into the intended revert. The
-// std ecrecover call still enforces low-s and the nonzero-result check.
-// Upstream std defect (solc's own ecrecover pre-zeroes the buffer); mirrored
-// here as a shim until it lands upstream.
-function recoverStrict(digest : bytes32, v : uint256, r : bytes32, s : bytes32) -> address {
+// ecrecover with the scratch slot zeroed first. Historical shim: the std
+// ecrecover at this pin pre-zeroes the scratch itself (the upstream defect we
+// filed was fixed), so this wrapper is now redundant defense in depth. It is
+// removed - and call sites go straight to std ecrecover - in the follow-up
+// commit, kept through the mechanical migration so this commit changes
+// spelling only.
+function recoverStrict(digest: bytes32, v: uint256, r: bytes32, s: bytes32) returns (address) {
     mstore(0, 0);
     return ecrecover(digest, v, r, s);
 }
 
-// NOTE: the split-signature helper (data Sig + splitSig) lives in Kodyl.solc,
-// not here, although this module is its natural home: pattern-matching a
-// constructor IMPORTED from another module fails SC0107 "invalid pattern
-// syntax" at the current pin (construction and same-module matches are fine),
-// so the ADT must live in the module that matches on it.
+// NOTE: the split-signature helper (enum Sig + splitSig) lives in Kodyl.sol,
+// not here, although this module is its natural home: at the OLD pin,
+// pattern-matching a constructor imported from another module failed SC0107.
+// The new qualified-pattern path lifts that restriction (probed at this pin),
+// so the pair moves here in the follow-up commit.
 
 // --- Solidity 0.8 semantics shims ---
 // Core Solidity arithmetic wraps and its assert hits the invalid opcode, so
 // Panic(uint256) reverts are reproduced by hand exactly where the logic
 // needs checked math (the checked-arithmetic shim).
 
-function panic(code : word) -> () {
+function panic(code: word) {
     let p = get_free_memory();
     mstore(p, 0x4e487b71); // Panic(uint256) selector, right-aligned in the word
     mstore(p + 32, code);
     revert_(p + 28, 36);
 }
 
-function solAssert(cond : bool) -> () {
+function solAssert(cond: bool) {
     if (!cond) { panic(0x01); }
 }
 
-function addCk(x : uint256, y : uint256) -> uint256 {
+function addCk(x: uint256, y: uint256) returns (uint256) {
     let r = x + y;
     if (r < x) { panic(0x11); }
     return r;
 }
 
-function subCk(x : uint256, y : uint256) -> uint256 {
+function subCk(x: uint256, y: uint256) returns (uint256) {
     if (y > x) { panic(0x11); }
     return x - y;
 }
 
-function mulCk(x : uint256, y : uint256) -> uint256 {
+function mulCk(x: uint256, y: uint256) returns (uint256) {
     if (x == 0) { return 0; }
     let r = x * y;
     if (r / x != y) { panic(0x11); }
@@ -182,28 +178,29 @@ function mulCk(x : uint256, y : uint256) -> uint256 {
 // --- revert payload builders ---
 // Errors WITH arguments need hand-built payloads matching abi.encodeWithSelector:
 // right-aligned 4-byte selector followed by 32-byte words. Call sites pass the
-// error signature literal, which folds to the selector through ErrSel : Str.
+// error signature literal, which folds to the selector through Str<ErrSel>.
 
-function revertWith2(e : ErrSel, a : word, b : word) -> () {
-    match e {
-    | ErrSel(sel) =>
+function revertWith2(e: ErrSel, a: word, b: word) {
+    match (e) {
+    case ErrSel(sel) {
         let p = get_free_memory();
         mstore(p, sel);      // selector occupies bytes p+28..p+31
         mstore(p + 32, a);
         mstore(p + 64, b);
         revert_(p + 28, 68);
     }
+    }
 }
 
 // Error(string)-shaped revert from a source literal: sel ++ abi.encode(string)
 // = selector (4 bytes, right-aligned) ++ 0x20 ++ len ++ padded data. Native
 // require(cond, "msg") reverts with RAW message bytes, so the Solidity wire
-// shape is still built by hand; only the reason string now lives in source.
+// shape is still built by hand; only the reason string lives in source.
 // The literal materializer zero-pads its final word, so whole-word copies are
 // byte-exact. Terminal code (revert follows), so free memory is not advanced.
-function revertStr(e : ErrSel, msg : memory(string)) -> () {
-    match e {
-    | ErrSel(sel) =>
+function revertStr(e: ErrSel, msg: memory<string>) {
+    match (e) {
+    case ErrSel(sel) {
         let p = get_free_memory();
         mstore(p, sel);
         mstore(p + 32, 32);  // offset of the string head
@@ -211,10 +208,11 @@ function revertStr(e : ErrSel, msg : memory(string)) -> () {
         let len = mload(sptr);
         mstore(p + 64, len);
         let padded = shr(5, len + 31) * 32;
-        for (let i : word = 0; i < padded; i = i + 32) {
+        for (let i: word = 0; i < padded; i = i + 32) {
             mstore(p + 96 + i, mload(sptr + 32 + i));
         }
         revert_(p + 28, 68 + padded);
+    }
     }
 }
 
@@ -223,7 +221,7 @@ function revertStr(e : ErrSel, msg : memory(string)) -> () {
 // allocators are emitted into the runtime object only; solcore
 // doc/comptime-string.md gap table), so the constructor cannot go through
 // revertStr - this packed word is the deliberate exhibit of that gap.
-function revertStr1(sel : word, len : word, w0 : word) -> () {
+function revertStr1(sel: word, len: word, w0: word) {
     let p = get_free_memory();
     mstore(p, sel);
     mstore(p + 32, 32);  // offset of the string head
@@ -238,12 +236,12 @@ function revertStr1(sel : word, len : word, w0 : word) -> () {
 // through revertStr.
 
 function validateEventParams(
-    depositAmount : uint256,
-    cancellationDeadline : uint256,
-    eventStart : uint256,
-    eventEnd : uint256,
-    disputePeriod : uint256
-) -> () {
+    depositAmount: uint256,
+    cancellationDeadline: uint256,
+    eventStart: uint256,
+    eventEnd: uint256,
+    disputePeriod: uint256
+) {
     if (depositAmount == 0) {
         revertStr("InvalidEventParameters(string)", "Deposit must be > 0");
     }
@@ -271,7 +269,7 @@ function validateEventParams(
 
 // --- ETH transfer (weth9 pattern) ---
 
-function sendValue(dst : address, wad : uint256) -> () {
+function sendValue(dst: address, wad: uint256) {
     let ret = call(gas(), Typedef.rep(dst), Typedef.rep(wad), 0, 0, 0, 0);
     requireK(ret != 0, "TransferFailed()");
 }
@@ -282,30 +280,30 @@ function sendValue(dst : address, wad : uint256) -> () {
 // signature, so no hash constants appear anywhere in the sources.
 
 // E() anonymous-data-free: topic0 only.
-function emitLog1(t0 : word) -> () {
+function emitLog1(t0: word) {
     log1_(0, 0, t0);
 }
 
 // E(x indexed): one topic, no data.
-function emitLog2(t0 : word, t1 : word) -> () {
+function emitLog2(t0: word, t1: word) {
     log2_(0, 0, t0, t1);
 }
 
 // E(x indexed, y indexed): two topics, no data.
-function emitLog3(t0 : word, t1 : word, t2 : word) -> () {
+function emitLog3(t0: word, t1: word, t2: word) {
     log3_(0, 0, t0, t1, t2);
 }
 
 // E(x indexed, y indexed, z): two topics, one data word.
-function emitLog3W1(t0 : word, t1 : word, t2 : word, d0 : word) -> () {
+function emitLog3W1(t0: word, t1: word, t2: word, d0: word) {
     let p = get_free_memory();
     mstore(p, d0);
     log3_(p, 32, t0, t1, t2);
 }
 
 // E(x indexed, y indexed, a, b, c): two topics, three data words.
-function emitLog3W3(t0 : word, t1 : word, t2 : word,
-                    d0 : word, d1 : word, d2 : word) -> () {
+function emitLog3W3(t0: word, t1: word, t2: word,
+                    d0: word, d1: word, d2: word) {
     let p = get_free_memory();
     mstore(p, d0);
     mstore(p + 32, d1);
@@ -313,11 +311,12 @@ function emitLog3W3(t0 : word, t1 : word, t2 : word,
     log3_(p, 96, t0, t1, t2);
 }
 
-// E(x indexed, string s): one topic, data = abi.encode(s). abi_encode returns
-// a pointer to the encoded head and advances free memory to the tail, so the
-// byte length is get_free_memory() - start (the dispatch return-size idiom).
-function emitLog2Str(t0 : word, t1 : word, s : memory(string)) -> () {
+// E(x indexed, string s): one topic, data = abi.encode(s). abi_encode
+// returns memory<bytes>: its rep points at a byte-length word with the
+// encoded payload in the following len bytes, so the log data starts one
+// word in and spans exactly that length.
+function emitLog2Str(t0: word, t1: word, s: memory<string>) {
     let enc = abi_encode(s);
-    let start = Typedef.rep(enc);
-    log2_(start, get_free_memory() - start, t0, t1);
+    let bptr = Typedef.rep(enc);
+    log2_(bptr + 32, mload(bptr), t0, t1);
 }

@@ -16,66 +16,67 @@
 // >=, not ==: forced ETH (selfdestruct / block-reward payments) can push the
 // balance above the ledger and cannot be rejected, so == would let 1 wei
 // permanently brick every flow. The surplus is simply unowned and stuck.
-import std.{*};
-import std.opcodes.{callvalue as callvalue_, shr, mload, calldatasize, calldataload};
-import std.{frombool};
-import std.dispatch.{*};
-import std.Generic.{*};
-import std.StorageGeneric.{*};
-import std.eip712.{*};
-import lib.kodyl.{*};
+import * from std;
+import {callvalue as callvalue_, shr, mload, calldatasize, calldataload} from std.opcodes;
+import {frombool} from std;
+import * from std.dispatch;
+import * from std.Generic;
+import * from std.StorageGeneric;
+import * from std.eip712;
+import * from lib.kodyl;
 
 // --- ADTs ---
 
 // Lifecycle state, derived from timestamps (never stored).
-data State = Registration | Active | Dispute | Settled | Cancelled;
+enum State { Registration, Active, Dispute, Settled, Cancelled }
 
 // Stored per (event, attendee). None is declared first so an unset mapping
 // key (the all-zero slot pattern) reads back as None.
-data AttendeeStatus = None | Registered | Cancelled | CheckedIn | Claimed | Rebated;
+enum AttendeeStatus { None, Registered, Cancelled, CheckedIn, Claimed, Rebated }
 
 // An event: either absent, or its immutable parameters. NoEvent is first so
 // an unset id reads back as NoEvent, and exhaustive matching forces every
 // function to decide what a missing event means.
 // Fields: organizer, depositAmount, cancellationDeadline, eventStart,
 //         eventEnd, disputePeriod, maxAttendees (0 = unlimited).
-data EventRec = NoEvent
-             | Ev(address, uint256, uint256, uint256, uint256, uint256, uint256);
+enum EventRec {
+    NoEvent,
+    Ev(address, uint256, uint256, uint256, uint256, uint256, uint256)
+}
 
 // Per-event tallies as one product value behind the event id. Fields, in
-// order: registered, checkedIn, claimed, held (constructor payloads are
-// positional; the language has no named fields). A single-constructor
+// order: registered, checkedIn, claimed, held. A single-constructor
 // product lays out as consecutive slots with NO tag word, so an unset id
 // reads back as Counters(0, 0, 0, 0) from the all-zero slots - the same
 // zero-slot design rule as NoEvent/None.
-data Counters = Counters(uint256, uint256, uint256, uint256);
+enum Counters { Counters(uint256, uint256, uint256, uint256) }
 
 // --- ordinals (ADTs stay Solidity-compatible at the ABI boundary) ---
 
-function stateOrd(s : State) -> uint256 {
-    match s {
-    | State.Registration => return 0;
-    | State.Active       => return 1;
-    | State.Dispute      => return 2;
-    | State.Settled      => return 3;
-    | State.Cancelled    => return 4;
+function stateOrd(s: State) returns (uint256) {
+    match (s) {
+    case State.Registration { return 0; }
+    case State.Active       { return 1; }
+    case State.Dispute      { return 2; }
+    case State.Settled      { return 3; }
+    case State.Cancelled    { return 4; }
     }
 }
 
-function statusOrd(s : AttendeeStatus) -> uint256 {
-    match s {
-    | AttendeeStatus.None       => return 0;
-    | AttendeeStatus.Registered => return 1;
-    | AttendeeStatus.Cancelled  => return 2;
-    | AttendeeStatus.CheckedIn  => return 3;
-    | AttendeeStatus.Claimed    => return 4;
-    | AttendeeStatus.Rebated    => return 5;
+function statusOrd(s: AttendeeStatus) returns (uint256) {
+    match (s) {
+    case AttendeeStatus.None       { return 0; }
+    case AttendeeStatus.Registered { return 1; }
+    case AttendeeStatus.Cancelled  { return 2; }
+    case AttendeeStatus.CheckedIn  { return 3; }
+    case AttendeeStatus.Claimed    { return 4; }
+    case AttendeeStatus.Rebated    { return 5; }
     }
 }
 
 // Pure state derivation: cancellation dominates, otherwise the clock decides.
-function deriveState(isCancelled : bool, eventStart : uint256, eventEnd : uint256,
-                     disputePeriod : uint256) -> State {
+function deriveState(isCancelled: bool, eventStart: uint256, eventEnd: uint256,
+                     disputePeriod: uint256) returns (State) {
     if (isCancelled) { return State.Cancelled; }
     let t = timeNow();
     if (t < eventStart) { return State.Registration; }
@@ -84,7 +85,7 @@ function deriveState(isCancelled : bool, eventStart : uint256, eventEnd : uint25
     return State.Settled;
 }
 
-function revertNotFound() -> () {
+function revertNotFound() {
     fail("EventNotFound()");
 }
 
@@ -92,8 +93,8 @@ function revertNotFound() -> () {
 // (rather than a raw time window) also rejects check-ins on a cancelled event,
 // where the state is Cancelled - otherwise an attendee could be flipped to
 // CheckedIn and then never recover their deposit.
-function requireCheckInOpen(isCancelled : bool, start : uint256, end_ : uint256,
-                            dispute : uint256) -> () {
+function requireCheckInOpen(isCancelled: bool, start: uint256, end_: uint256,
+                            dispute: uint256) {
     let s = stateOrd(deriveState(isCancelled, start, end_, dispute));
     if (s != 1 && s != 2) {
         fail("CheckInWindowClosed()");
@@ -103,31 +104,35 @@ function requireCheckInOpen(isCancelled : bool, start : uint256, end_ : uint256,
 // Exhaustive registration gate: the type system forces a decision for every
 // status. None and Cancelled may (re-)register; everything else names its
 // own failure.
-function registerGuard(st : AttendeeStatus) -> () {
-    match st {
-    | AttendeeStatus.None      => return ();
-    | AttendeeStatus.Cancelled => return ();
-    | AttendeeStatus.Registered =>
+function registerGuard(st: AttendeeStatus) {
+    match (st) {
+    case AttendeeStatus.None      { return; }
+    case AttendeeStatus.Cancelled { return; }
+    case AttendeeStatus.Registered {
         fail("AlreadyRegistered()");
-    | AttendeeStatus.CheckedIn =>
+    }
+    case AttendeeStatus.CheckedIn {
         revertWith2("InvalidAttendeeStatus(uint8,uint8)", 3, 0);
-    | AttendeeStatus.Claimed =>
+    }
+    case AttendeeStatus.Claimed {
         revertWith2("InvalidAttendeeStatus(uint8,uint8)", 4, 0);
-    | AttendeeStatus.Rebated =>
+    }
+    case AttendeeStatus.Rebated {
         // Unreachable in practice (Rebated only exists at Settled, where
         // registration is closed), but the exhaustive match names it anyway.
         revertWith2("InvalidAttendeeStatus(uint8,uint8)", 5, 0);
     }
+    }
 }
 
-function requireStatus(st : AttendeeStatus, expected : word) -> () {
+function requireStatus(st: AttendeeStatus, expected: word) {
     let cur = Typedef.rep(statusOrd(st));
     if (cur != expected) {
         revertWith2("InvalidAttendeeStatus(uint8,uint8)", cur, expected);
     }
 }
 
-function onlyOrganizerOf(org : address) -> () {
+function onlyOrganizerOf(org: address) {
     requireK(caller() == org, "NotOrganizer()");
 }
 
@@ -136,18 +141,18 @@ function onlyOrganizerOf(org : address) -> () {
 // keccak256(typeHash ++ one 32-byte word per member), the typeHash folded at
 // compile time. The type strings are the wire contract with off-chain
 // signers: test/Kodyl.t.sol pins them (TICKET_TYPEHASH / PRESENCE_TYPEHASH)
-// with an independent keccak, and the phase 3 frontend signer must match the
+// with an independent keccak, and the frontend signer must match the
 // same strings byte-for-byte.
 
 // The attendee address is deliberately NOT in the Ticket payload: ecrecover
 // yields the signer, and verifyProof requires it to equal the attendee
 // argument - the signature itself is the address binding.
-function hashTicket(eid : uint256) -> bytes32 {
+function hashTicket(eid: uint256) returns (bytes32) {
     let typeHash = bytes32(keccakLit("Ticket(uint256 eventId)"));
     return keccak256_(concat(typeHash, bytes32(Typedef.rep(eid))));
 }
 
-function hashPresence(eid : uint256, attendee : address) -> bytes32 {
+function hashPresence(eid: uint256, attendee: address) returns (bytes32) {
     let typeHash = bytes32(
         keccakLit("Presence(uint256 eventId,address attendee)"));
     return keccak256_(concat(
@@ -157,24 +162,25 @@ function hashPresence(eid : uint256, attendee : address) -> bytes32 {
 }
 
 // Domain separator: name "Kodyl", version "1", the runtime chain id, this
-// contract. Computed per call (caching in storage is a later optimization,
-// not v2); binds every proof to one deployment on one chain.
-function domainSep() -> bytes32 {
+// contract. Computed per call (caching in storage is a later optimization);
+// binds every proof to one deployment on one chain.
+function domainSep() returns (bytes32) {
     return eip712DomainSeparator(
         bytes32(keccakLit("Kodyl")), bytes32(keccakLit("1")), chainId(), self());
 }
 
 // A split 65-byte r||s||v signature. A product ADT rather than a tuple
 // return (no tuple destructuring at let in the language), matched by
-// consumers - the Counters idiom. Defined HERE and not in lib.kodyl:
-// pattern-matching a constructor imported from another module fails SC0107
-// at the current pin, so the ADT lives with its match sites.
-data Sig = Sig(bytes32, bytes32, uint256);
+// consumers - the Counters idiom. Still defined HERE rather than in
+// lib.kodyl: the old pin rejected matching a constructor imported from
+// another module (SC0107); the new qualified-pattern path lifts that, and
+// the pair moves to the lib in the follow-up commit.
+enum Sig { Sig(bytes32, bytes32, uint256) }
 
 // Splits the 65-byte r||s||v wire format that signTypedData produces. v is
 // the raw recovery byte (27/28), passed through as uint256 - std ecrecover
 // takes uint256 and rejects invalid values itself.
-function splitSig(sig : memory(bytes)) -> Sig {
+function splitSig(sig: memory<bytes>) returns (Sig) {
     let p = Typedef.rep(sig);
     requireK(mload(p) == 65, "InvalidSignatureLength()");
     let r = bytes32(mload(p + 32));
@@ -186,29 +192,29 @@ function splitSig(sig : memory(bytes)) -> Sig {
 }
 
 contract Kodyl {
-    maintainer : address;
-    eventCount : uint256;
+    maintainer: address;
+    eventCount: uint256;
     // Global deposit ledger: the contract balance must be at least this after
     // every ETH movement (the singleton generalization of spec.md invariant 1).
-    totalHeld : uint256;
+    totalHeld: uint256;
 
     // Per-event state, keyed by eventId (1..eventCount; id 0 is never used,
     // so the NoEvent zero pattern is unreachable for real ids).
-    eventsRec : mapping(uint256, EventRec);
+    eventsRec: mapping(uint256 => EventRec);
     // Sequential ids make an array the natural container; ids are 1-based so
     // the URI for event eid lives at index eid - 1.
-    metadataUris : array(string);
-    cancelledM : mapping(uint256, bool);
-    statusM : mapping(uint256, mapping(address, AttendeeStatus));
+    metadataUris: array<string>;
+    cancelledM: mapping(uint256 => bool);
+    statusM: mapping(uint256 => mapping(address => AttendeeStatus));
     // Per-event tallies (Counters above). The held field is the per-event
     // pot: deposits in, refunds/payouts/dust out. Makes dust exact per event
     // instead of relying on the (shared) contract balance.
-    countersM : mapping(uint256, Counters);
+    countersM: mapping(uint256 => Counters);
     // Door operators authorized to countersign Presence proofs, per event.
     // The zero slot reads false (not operator) - the zero-pattern rule.
-    operatorsM : mapping(uint256, mapping(address, bool));
+    operatorsM: mapping(uint256 => mapping(address => bool));
 
-    constructor(maintainer_ : address) {
+    constructor(maintainer_: address) {
         // The ONE surviving packed-word reason ("Zero address"): string
         // literals do not materialize in deploy code (allocators live in the
         // runtime object only; solcore doc/comptime-string.md gap table), so
@@ -222,15 +228,15 @@ contract Kodyl {
 
     // --- event creation: a state write, not a deployment ---
 
-    public function createEvent(
-        depositAmount : uint256,
-        cancellationDeadline : uint256,
-        eventStart : uint256,
-        eventEnd : uint256,
-        disputePeriod : uint256,
-        maxAttendees : uint256,
-        metadataURI_ : memory(string)
-    ) -> uint256 {
+    function createEvent(
+        depositAmount: uint256,
+        cancellationDeadline: uint256,
+        eventStart: uint256,
+        eventEnd: uint256,
+        disputePeriod: uint256,
+        maxAttendees: uint256,
+        metadataURI_: memory<string>
+    ) public returns (uint256) {
         validateEventParams(depositAmount, cancellationDeadline, eventStart, eventEnd, disputePeriod);
 
         let eid = eventCount + 1;
@@ -248,87 +254,93 @@ contract Kodyl {
 
     // --- read surface ---
 
-    public function maintainer() -> address { return maintainer; }
-    public function eventCount() -> uint256 { return eventCount; }
-    public function totalHeld() -> uint256 { return totalHeld; }
+    function maintainer() public returns (address) { return maintainer; }
+    function eventCount() public returns (uint256) { return eventCount; }
+    function totalHeld() public returns (uint256) { return totalHeld; }
 
     // All seven parameters of an event in one call; reverts for unknown ids.
-    public function getEvent(eid : uint256)
-        -> (address, uint256, uint256, uint256, uint256, uint256, uint256) {
-        match eventsRec[eid] {
-        | EventRec.NoEvent =>
+    function getEvent(eid: uint256)
+        public returns ((address, uint256, uint256, uint256, uint256, uint256, uint256)) {
+        match (eventsRec[eid]) {
+        case EventRec.NoEvent {
             revertNotFound();
             return (address(0), 0, 0, 0, 0, 0, 0);
-        | EventRec.Ev(org, dep, deadline, start, end_, dispute, cap) =>
+        }
+        case EventRec.Ev(org, dep, deadline, start, end_, dispute, cap) {
             return (org, dep, deadline, start, end_, dispute, cap);
         }
-    }
-
-    public function organizer(eid : uint256) -> address {
-        match eventsRec[eid] {
-        | EventRec.NoEvent => revertNotFound(); return address(0);
-        | EventRec.Ev(org, dep, deadline, start, end_, dispute, cap) => return org;
         }
     }
 
-    public function getState(eid : uint256) -> uint256 {
-        match eventsRec[eid] {
-        | EventRec.NoEvent => revertNotFound(); return 0;
-        | EventRec.Ev(org, dep, deadline, start, end_, dispute, cap) =>
+    function organizer(eid: uint256) public returns (address) {
+        match (eventsRec[eid]) {
+        case EventRec.NoEvent { revertNotFound(); return address(0); }
+        case EventRec.Ev(org, dep, deadline, start, end_, dispute, cap) { return org; }
+        }
+    }
+
+    function getState(eid: uint256) public returns (uint256) {
+        match (eventsRec[eid]) {
+        case EventRec.NoEvent { revertNotFound(); return 0; }
+        case EventRec.Ev(org, dep, deadline, start, end_, dispute, cap) {
             return stateOrd(deriveState(cancelledM[eid], start, end_, dispute));
         }
+        }
     }
 
-    public function attendees(eid : uint256, a : address) -> uint256 {
+    function attendees(eid: uint256, a: address) public returns (uint256) {
         return statusOrd(statusM[eid][a]);
     }
 
-    public function metadataURI(eid : uint256) -> memory(string) {
-        match eventsRec[eid] {
+    function metadataURI(eid: uint256) public returns (memory<string>) {
+        match (eventsRec[eid]) {
         // Index literals stay cast: array indexing is generic over the index
         // type, so a bare 0 leaves it ambiguous.
-        | EventRec.NoEvent => revertNotFound(); return metadataUris[uint256(0)];
-        | EventRec.Ev(org, dep, deadline, start, end_, dispute, cap) =>
+        case EventRec.NoEvent { revertNotFound(); return metadataUris[uint256(0)]; }
+        case EventRec.Ev(org, dep, deadline, start, end_, dispute, cap) {
             return metadataUris[eid - 1];
+        }
         }
     }
 
-    public function cancelled(eid : uint256) -> bool { return cancelledM[eid]; }
+    function cancelled(eid: uint256) public returns (bool) { return cancelledM[eid]; }
 
     // Counter getters keep their per-field signatures; each projects one
     // field out of the product (unknown id: the zero record, so 0).
-    public function registeredCount(eid : uint256) -> uint256 {
-        match countersM[eid] { | Counters(reg, chk, clm, hld) => return reg; }
+    function registeredCount(eid: uint256) public returns (uint256) {
+        match (countersM[eid]) { case Counters(reg, chk, clm, hld) { return reg; } }
     }
-    public function checkedInCount(eid : uint256) -> uint256 {
-        match countersM[eid] { | Counters(reg, chk, clm, hld) => return chk; }
+    function checkedInCount(eid: uint256) public returns (uint256) {
+        match (countersM[eid]) { case Counters(reg, chk, clm, hld) { return chk; } }
     }
-    public function claimedCount(eid : uint256) -> uint256 {
-        match countersM[eid] { | Counters(reg, chk, clm, hld) => return clm; }
+    function claimedCount(eid: uint256) public returns (uint256) {
+        match (countersM[eid]) { case Counters(reg, chk, clm, hld) { return clm; } }
     }
-    public function held(eid : uint256) -> uint256 {
-        match countersM[eid] { | Counters(reg, chk, clm, hld) => return hld; }
+    function held(eid: uint256) public returns (uint256) {
+        match (countersM[eid]) { case Counters(reg, chk, clm, hld) { return hld; } }
     }
 
-    public function rewardPerAttendee(eid : uint256) -> uint256 {
-        match eventsRec[eid] {
-        | EventRec.NoEvent => revertNotFound(); return 0;
-        | EventRec.Ev(org, dep, deadline, start, end_, dispute, cap) =>
-            match countersM[eid] {
-            | Counters(reg, chk, clm, hld) => return calcReward(reg, chk, dep);
+    function rewardPerAttendee(eid: uint256) public returns (uint256) {
+        match (eventsRec[eid]) {
+        case EventRec.NoEvent { revertNotFound(); return 0; }
+        case EventRec.Ev(org, dep, deadline, start, end_, dispute, cap) {
+            match (countersM[eid]) {
+            case Counters(reg, chk, clm, hld) { return calcReward(reg, chk, dep); }
             }
+        }
         }
     }
 
     // The per-no-show rebate under the reward cap (0 when the cap is not
     // binding). Record-backed like rewardPerAttendee: unknown ids revert.
-    public function noShowRebate(eid : uint256) -> uint256 {
-        match eventsRec[eid] {
-        | EventRec.NoEvent => revertNotFound(); return 0;
-        | EventRec.Ev(org, dep, deadline, start, end_, dispute, cap) =>
-            match countersM[eid] {
-            | Counters(reg, chk, clm, hld) => return calcRebate(reg, chk, dep);
+    function noShowRebate(eid: uint256) public returns (uint256) {
+        match (eventsRec[eid]) {
+        case EventRec.NoEvent { revertNotFound(); return 0; }
+        case EventRec.Ev(org, dep, deadline, start, end_, dispute, cap) {
+            match (countersM[eid]) {
+            case Counters(reg, chk, clm, hld) { return calcRebate(reg, chk, dep); }
             }
+        }
         }
     }
 
@@ -337,7 +349,7 @@ contract Kodyl {
     // not a lottery, so a checked-in sybil can extract at most the cap however
     // many honest registrations it farms. Takes the tallies as arguments:
     // callers already hold a Counters binding and must not re-read the mapping.
-    function calcReward(reg : uint256, chk : uint256, dep : uint256) -> uint256 {
+    function calcReward(reg: uint256, chk: uint256, dep: uint256) returns (uint256) {
         if (chk == 0) { return 0; }
         let noShow = subCk(reg, chk);
         let uncapped = mulCk(noShow, dep) / chk;
@@ -351,7 +363,7 @@ contract Kodyl {
     // pool exceeds the claimants' capped total - the regime a fake event or
     // a mass no-show produces. Zero check-ins is abandonment (claimRefund
     // pays in full), never a rebate.
-    function calcRebate(reg : uint256, chk : uint256, dep : uint256) -> uint256 {
+    function calcRebate(reg: uint256, chk: uint256, dep: uint256) returns (uint256) {
         if (chk == 0) { return 0; }
         let noShow = subCk(reg, chk);
         if (noShow == 0) { return 0; }
@@ -363,17 +375,17 @@ contract Kodyl {
 
     // Public constant getters: forward to the lib.kodyl nullary functions,
     // the single source every internal guard reads too.
-    public function MAX_BATCH_SIZE() -> uint256 { return maxBatchSize(); }
-    public function DUST_CLAIM_TIMEOUT() -> uint256 { return dustClaimTimeout(); }
-    public function MIN_CANCELLATION_BUFFER() -> uint256 { return minCancellationBuffer(); }
-    public function REWARD_CAP_MULTIPLE() -> uint256 { return rewardCapMultiple(); }
+    function MAX_BATCH_SIZE() public returns (uint256) { return maxBatchSize(); }
+    function DUST_CLAIM_TIMEOUT() public returns (uint256) { return dustClaimTimeout(); }
+    function MIN_CANCELLATION_BUFFER() public returns (uint256) { return minCancellationBuffer(); }
+    function REWARD_CAP_MULTIPLE() public returns (uint256) { return rewardCapMultiple(); }
 
     // --- attendee flow ---
 
-    public payable function register(eid : uint256) -> () {
-        match eventsRec[eid] {
-        | EventRec.NoEvent => revertNotFound();
-        | EventRec.Ev(org, dep, deadline, start, end_, dispute, cap) =>
+    function register(eid: uint256) public payable returns (()) {
+        match (eventsRec[eid]) {
+        case EventRec.NoEvent { revertNotFound(); }
+        case EventRec.Ev(org, dep, deadline, start, end_, dispute, cap) {
             requireK(stateOrd(deriveState(cancelledM[eid], start, end_, dispute)) == 0,
                      "RegistrationClosed()");
             registerGuard(statusM[eid][caller()]);
@@ -381,13 +393,14 @@ contract Kodyl {
                 revertWith2("IncorrectDeposit(uint256,uint256)",
                             Typedef.rep(dep), Typedef.rep(caller_value()));
             }
-            match countersM[eid] {
-            | Counters(reg, chk, clm, hld) =>
+            match (countersM[eid]) {
+            case Counters(reg, chk, clm, hld) {
                 if (cap > 0 && reg >= cap) {
                     fail("EventFull()");
                 }
                 statusM[eid][caller()] = AttendeeStatus.Registered;
                 countersM[eid] = Counters(reg + 1, chk, clm, addCk(hld, dep));
+            }
             }
             totalHeld = addCk(totalHeld, dep);
 
@@ -396,19 +409,21 @@ contract Kodyl {
             emitLog3(keccakLit("Registered(uint256,address)"),
                      Typedef.rep(eid), Typedef.rep(caller()));
         }
+        }
     }
 
-    public function cancel(eid : uint256) -> () {
-        match eventsRec[eid] {
-        | EventRec.NoEvent => revertNotFound();
-        | EventRec.Ev(org, dep, deadline, start, end_, dispute, cap) =>
+    function cancel(eid: uint256) public returns (()) {
+        match (eventsRec[eid]) {
+        case EventRec.NoEvent { revertNotFound(); }
+        case EventRec.Ev(org, dep, deadline, start, end_, dispute, cap) {
             requireK(timeNow() <= deadline, "CancellationDeadlinePassed()");
             requireStatus(statusM[eid][caller()], 1);
 
             statusM[eid][caller()] = AttendeeStatus.Cancelled;
-            match countersM[eid] {
-            | Counters(reg, chk, clm, hld) =>
+            match (countersM[eid]) {
+            case Counters(reg, chk, clm, hld) {
                 countersM[eid] = Counters(reg - 1, chk, clm, subCk(hld, dep));
+            }
             }
             totalHeld = subCk(totalHeld, dep);
 
@@ -419,6 +434,7 @@ contract Kodyl {
             emitLog3(keccakLit("RegistrationCancelled(uint256,address)"),
                      Typedef.rep(eid), Typedef.rep(caller()));
         }
+        }
     }
 
     // Refund path without organizer cooperation. Open in two regimes with the
@@ -428,12 +444,12 @@ contract Kodyl {
     // or a no-show door, so the fail-safe outcome is everyone's deposit back.
     // Both pots are exactly the sum of attributed deposits: refunds never
     // expire and there is no dust to sweep (claimDust refuses chk == 0).
-    public function claimRefund(eid : uint256) -> () {
-        match eventsRec[eid] {
-        | EventRec.NoEvent => revertNotFound();
-        | EventRec.Ev(org, dep, deadline, start, end_, dispute, cap) =>
-            match countersM[eid] {
-            | Counters(reg, chk, clm, hld) =>
+    function claimRefund(eid: uint256) public returns (()) {
+        match (eventsRec[eid]) {
+        case EventRec.NoEvent { revertNotFound(); }
+        case EventRec.Ev(org, dep, deadline, start, end_, dispute, cap) {
+            match (countersM[eid]) {
+            case Counters(reg, chk, clm, hld) {
                 let wasCancelled = cancelledM[eid];
                 let abandoned =
                     stateOrd(deriveState(wasCancelled, start, end_, dispute)) == 3 && chk == 0;
@@ -451,20 +467,22 @@ contract Kodyl {
                 emitLog3W1(keccakLit("RefundClaimed(uint256,address,uint256)"),
                            Typedef.rep(eid), Typedef.rep(caller()), Typedef.rep(dep));
             }
+            }
+        }
         }
     }
 
-    public function claim(eid : uint256) -> () {
-        match eventsRec[eid] {
-        | EventRec.NoEvent => revertNotFound();
-        | EventRec.Ev(org, dep, deadline, start, end_, dispute, cap) =>
+    function claim(eid: uint256) public returns (()) {
+        match (eventsRec[eid]) {
+        case EventRec.NoEvent { revertNotFound(); }
+        case EventRec.Ev(org, dep, deadline, start, end_, dispute, cap) {
             requireK(stateOrd(deriveState(cancelledM[eid], start, end_, dispute)) == 3,
                      "NotSettled()");
             requireStatus(statusM[eid][caller()], 3);
 
             statusM[eid][caller()] = AttendeeStatus.Claimed;
-            match countersM[eid] {
-            | Counters(reg, chk, clm, hld) =>
+            match (countersM[eid]) {
+            case Counters(reg, chk, clm, hld) {
                 let payout = addCk(dep, calcReward(reg, chk, dep));
                 // During normal settlement the pot always covers every
                 // remaining payout, so payout > held can only mean the pot
@@ -482,6 +500,8 @@ contract Kodyl {
                 emitLog3W1(keccakLit("Claimed(uint256,address,uint256)"),
                            Typedef.rep(eid), Typedef.rep(caller()), Typedef.rep(payout));
             }
+            }
+        }
         }
     }
 
@@ -491,14 +511,14 @@ contract Kodyl {
     // deliberately does NOT touch registeredCount, so reward and rebate math
     // stay frozen for every later claimant. PayoutSwept mirrors claim: after
     // the timeout sweep the pot is gone and the late rebate says so plainly.
-    public function claimNoShowRebate(eid : uint256) -> () {
-        match eventsRec[eid] {
-        | EventRec.NoEvent => revertNotFound();
-        | EventRec.Ev(org, dep, deadline, start, end_, dispute, cap) =>
+    function claimNoShowRebate(eid: uint256) public returns (()) {
+        match (eventsRec[eid]) {
+        case EventRec.NoEvent { revertNotFound(); }
+        case EventRec.Ev(org, dep, deadline, start, end_, dispute, cap) {
             requireK(stateOrd(deriveState(cancelledM[eid], start, end_, dispute)) == 3,
                      "NotSettled()");
-            match countersM[eid] {
-            | Counters(reg, chk, clm, hld) =>
+            match (countersM[eid]) {
+            case Counters(reg, chk, clm, hld) {
                 let per = calcRebate(reg, chk, dep);
                 requireK(per != 0, "NothingToRebate()");
                 requireStatus(statusM[eid][caller()], 1);
@@ -515,6 +535,8 @@ contract Kodyl {
                 emitLog3W1(keccakLit("RebateClaimed(uint256,address,uint256)"),
                            Typedef.rep(eid), Typedef.rep(caller()), Typedef.rep(per));
             }
+            }
+        }
         }
     }
 
@@ -525,7 +547,7 @@ contract Kodyl {
     // currently Registered, so batches tolerate invalid entries. Returns the
     // tally delta (1 = flipped, 0 = skipped): the counters write belongs to
     // the entry points, once per external call, not per attendee.
-    function checkInInner(eid : uint256, a : address) -> uint256 {
+    function checkInInner(eid: uint256, a: address) returns (uint256) {
         if (statusOrd(statusM[eid][a]) == 1) {
             statusM[eid][a] = AttendeeStatus.CheckedIn;
             emitLog3(keccakLit("CheckedIn(uint256,address)"),
@@ -538,21 +560,23 @@ contract Kodyl {
     // The one counters read-modify-write behind both check-in entry points.
     // Skipped entirely when nothing flipped (an all-skips call would otherwise
     // pay a redundant same-value 4-slot write).
-    function bumpCheckedIn(eid : uint256, n : uint256) -> () {
-        if (n == 0) { return (); }
-        match countersM[eid] {
-        | Counters(reg, chk, clm, hld) =>
+    function bumpCheckedIn(eid: uint256, n: uint256) {
+        if (n == 0) { return; }
+        match (countersM[eid]) {
+        case Counters(reg, chk, clm, hld) {
             countersM[eid] = Counters(reg, chk + n, clm, hld);
+        }
         }
     }
 
-    public function checkIn(eid : uint256, a : address) -> () {
-        match eventsRec[eid] {
-        | EventRec.NoEvent => revertNotFound();
-        | EventRec.Ev(org, dep, deadline, start, end_, dispute, cap) =>
+    function checkIn(eid: uint256, a: address) public returns (()) {
+        match (eventsRec[eid]) {
+        case EventRec.NoEvent { revertNotFound(); }
+        case EventRec.Ev(org, dep, deadline, start, end_, dispute, cap) {
             onlyOrganizerOf(org);
             requireCheckInOpen(cancelledM[eid], start, end_, dispute);
             bumpCheckedIn(eid, checkInInner(eid, a));
+        }
         }
     }
 
@@ -562,20 +586,21 @@ contract Kodyl {
     // strictly (a calldata word above 1 reverts DirtyHigherBitsForBool in
     // std), matching the typed address paths.
 
-    public function setOperator(eid : uint256, operator : address, enabled : bool) -> () {
-        match eventsRec[eid] {
-        | EventRec.NoEvent => revertNotFound();
-        | EventRec.Ev(org, dep, deadline, start, end_, dispute, cap) =>
+    function setOperator(eid: uint256, operator: address, enabled: bool) public returns (()) {
+        match (eventsRec[eid]) {
+        case EventRec.NoEvent { revertNotFound(); }
+        case EventRec.Ev(org, dep, deadline, start, end_, dispute, cap) {
             onlyOrganizerOf(org);
             operatorsM[eid][operator] = enabled;
             emitLog3W1(keccakLit("OperatorSet(uint256,address,bool)"),
                        Typedef.rep(eid), Typedef.rep(operator), frombool(enabled));
         }
+        }
     }
 
     // Raw-mapping getter, zero-tier like the stat getters: false for unknown
     // events and unknown addresses alike.
-    public function isOperator(eid : uint256, a : address) -> bool {
+    function isOperator(eid: uint256, a: address) public returns (bool) {
         return operatorsM[eid][a];
     }
 
@@ -593,16 +618,17 @@ contract Kodyl {
     // real signer or reverts (MalleableSignatureRejected / ECRecoverFailed) -
     // never a stale scratch word - so no comparison here sees garbage. The
     // domain separator is passed in so a batch hashes it once.
-    function verifyProof(eid : uint256, org : address, dom : bytes32,
-                         attendee : address,
-                         ticketSig : memory(bytes), presenceSig : memory(bytes)) -> () {
-        match splitSig(ticketSig) {
-        | Sig(r, s, v) =>
+    function verifyProof(eid: uint256, org: address, dom: bytes32,
+                         attendee: address,
+                         ticketSig: memory<bytes>, presenceSig: memory<bytes>) {
+        match (splitSig(ticketSig)) {
+        case Sig.Sig(r, s, v) {
             requireK(recoverStrict(eip712Digest(dom, hashTicket(eid)), v, r, s) == attendee,
                      "TicketSignerMismatch()");
         }
-        match splitSig(presenceSig) {
-        | Sig(r, s, v) =>
+        }
+        match (splitSig(presenceSig)) {
+        case Sig.Sig(r, s, v) {
             let signer =
                 recoverStrict(eip712Digest(dom, hashPresence(eid, attendee)), v, r, s);
             // No short-circuit in the language - both operands always
@@ -610,16 +636,18 @@ contract Kodyl {
             requireK(signer == org || operatorsM[eid][signer],
                      "PresenceSignerUnauthorized()");
         }
+        }
     }
 
-    public function checkInWithProof(eid : uint256, attendee : address,
-                                     ticketSig : memory(bytes), presenceSig : memory(bytes)) -> () {
-        match eventsRec[eid] {
-        | EventRec.NoEvent => revertNotFound();
-        | EventRec.Ev(org, dep, deadline, start, end_, dispute, cap) =>
+    function checkInWithProof(eid: uint256, attendee: address,
+                              ticketSig: memory<bytes>, presenceSig: memory<bytes>) public returns (()) {
+        match (eventsRec[eid]) {
+        case EventRec.NoEvent { revertNotFound(); }
+        case EventRec.Ev(org, dep, deadline, start, end_, dispute, cap) {
             requireCheckInOpen(cancelledM[eid], start, end_, dispute);
             verifyProof(eid, org, domainSep(), attendee, ticketSig, presenceSig);
             bumpCheckedIn(eid, checkInInner(eid, attendee));
+        }
         }
     }
 
@@ -627,21 +655,21 @@ contract Kodyl {
     // no-ops (already checked in / not registered), but a bad signature or
     // unauthorized presence signer REVERTS the whole batch - that is a
     // malformed submission, not benign state drift. The typed
-    // calldata-array parameters decode lazily (the post-1950e707 path); the
-    // hand-decoded checkInBatch fallback shows what this required before.
+    // calldata-array parameters decode lazily; the hand-decoded checkInBatch
+    // fallback shows what this required before the decoder landed.
     // The first array is NOT named attendees: a parameter sharing a public
     // function's name (the attendees getter) resolves against the function in
     // the term namespace, degrading the parameter's type to an unsolved
     // variable (SC0223 "cannot entail ... RValueIdxAccess").
-    public function checkInBatchWithProofs(
-        eid : uint256,
-        toCheck : calldata(array(address)),
-        ticketSigs : calldata(array(memory(bytes))),
-        presenceSigs : calldata(array(memory(bytes)))
-    ) -> () {
-        match eventsRec[eid] {
-        | EventRec.NoEvent => revertNotFound();
-        | EventRec.Ev(org, dep, deadline, start, end_, dispute, cap) =>
+    function checkInBatchWithProofs(
+        eid: uint256,
+        toCheck: calldata<array<address>>,
+        ticketSigs: calldata<array<memory<bytes>>>,
+        presenceSigs: calldata<array<memory<bytes>>>
+    ) public returns (()) {
+        match (eventsRec[eid]) {
+        case EventRec.NoEvent { revertNotFound(); }
+        case EventRec.Ev(org, dep, deadline, start, end_, dispute, cap) {
             requireCheckInOpen(cancelledM[eid], start, end_, dispute);
             let n = toCheck.length();
             requireK(ticketSigs.length() == n, "ProofArrayMismatch()");
@@ -662,41 +690,44 @@ contract Kodyl {
             }
             bumpCheckedIn(eid, flips);
         }
+        }
     }
 
-    public function cancelEvent(eid : uint256) -> () {
-        match eventsRec[eid] {
-        | EventRec.NoEvent => revertNotFound();
-        | EventRec.Ev(org, dep, deadline, start, end_, dispute, cap) =>
+    function cancelEvent(eid: uint256) public returns (()) {
+        match (eventsRec[eid]) {
+        case EventRec.NoEvent { revertNotFound(); }
+        case EventRec.Ev(org, dep, deadline, start, end_, dispute, cap) {
             onlyOrganizerOf(org);
             requireK(stateOrd(deriveState(cancelledM[eid], start, end_, dispute)) == 0,
                      "EventAlreadyStarted()");
             cancelledM[eid] = true;
             emitLog2(keccakLit("EventCancelled(uint256)"), Typedef.rep(eid));
         }
+        }
     }
 
-    public function setMetadataURI(eid : uint256, newUri : memory(string)) -> () {
-        match eventsRec[eid] {
-        | EventRec.NoEvent => revertNotFound();
-        | EventRec.Ev(org, dep, deadline, start, end_, dispute, cap) =>
+    function setMetadataURI(eid: uint256, newUri: memory<string>) public returns (()) {
+        match (eventsRec[eid]) {
+        case EventRec.NoEvent { revertNotFound(); }
+        case EventRec.Ev(org, dep, deadline, start, end_, dispute, cap) {
             onlyOrganizerOf(org);
             metadataUris[eid - 1] = newUri;
             emitLog2Str(keccakLit("MetadataUpdated(uint256,string)"),
                         Typedef.rep(eid), newUri);
         }
+        }
     }
 
     // --- dust ---
 
-    public function claimDust(eid : uint256) -> () {
-        match eventsRec[eid] {
-        | EventRec.NoEvent => revertNotFound();
-        | EventRec.Ev(org, dep, deadline, start, end_, dispute, cap) =>
+    function claimDust(eid: uint256) public returns (()) {
+        match (eventsRec[eid]) {
+        case EventRec.NoEvent { revertNotFound(); }
+        case EventRec.Ev(org, dep, deadline, start, end_, dispute, cap) {
             requireK(stateOrd(deriveState(cancelledM[eid], start, end_, dispute)) == 3,
                      "NotSettled()");
-            match countersM[eid] {
-            | Counters(reg, chk, clm, hld) =>
+            match (countersM[eid]) {
+            case Counters(reg, chk, clm, hld) {
                 // A zero-check-in settlement is abandonment, not dust: the pot
                 // is exactly the attributed deposits and belongs to claimRefund
                 // (which never expires), so there is no sweep - mirroring
@@ -727,12 +758,14 @@ contract Kodyl {
                 emitLog3W1(keccakLit("DustClaimed(uint256,address,uint256)"),
                            Typedef.rep(eid), Typedef.rep(maintainer), Typedef.rep(dust));
             }
+            }
+        }
         }
     }
 
     // --- maintainer ---
 
-    public function setMaintainer(newMaintainer : address) -> () {
+    function setMaintainer(newMaintainer: address) public returns (()) {
         requireK(caller() == maintainer, "NotAuthorized()");
         if (Typedef.rep(newMaintainer) == 0) {
             revertStr("InvalidEventParameters(string)", "Zero address");
@@ -749,15 +782,15 @@ contract Kodyl {
     // --- fallback: stray-ETH rejection + checkInBatch manual dispatch ---
 
     // checkInBatch(uint256,address[]) predates lazy calldata-array decoding
-    // (landed at the 1950e707 re-pin) and stays hand-decoded deliberately:
-    // wire compat, the stray-ETH rejection lives in this same fallback, and
-    // it is the exhibit of what pre-decoder Core Solidity required. Plain ETH
-    // transfers (empty calldata) and unknown selectors revert.
-    function checkInBatchImpl() -> () {
+    // and stays hand-decoded deliberately: wire compat, the stray-ETH
+    // rejection lives in this same fallback, and it is the exhibit of what
+    // pre-decoder Core Solidity required. Plain ETH transfers (empty
+    // calldata) and unknown selectors revert.
+    function checkInBatchImpl() {
         let eid = uint256(calldataload(4));
-        match eventsRec[eid] {
-        | EventRec.NoEvent => revertNotFound();
-        | EventRec.Ev(org, dep, deadline, start, end_, dispute, cap) =>
+        match (eventsRec[eid]) {
+        case EventRec.NoEvent { revertNotFound(); }
+        case EventRec.Ev(org, dep, deadline, start, end_, dispute, cap) {
             onlyOrganizerOf(org);
             requireCheckInOpen(cancelledM[eid], start, end_, dispute);
             let lenPtr = 4 + calldataload(36); // second arg head holds the array offset
@@ -771,7 +804,7 @@ contract Kodyl {
             // Flips accumulate across the loop; the counters record is
             // read-modified-written ONCE after it, not per attendee.
             let flips = uint256(0);
-            for (let i : word = 0; i < len; i = i + 1) {
+            for (let i: word = 0; i < len; i = i + 1) {
                 let w = calldataload(lenPtr + 32 + i * 32);
                 // Strict ABI decoding, matching the std decoder on the typed
                 // path (checkIn): an address word with dirty upper bits
@@ -782,9 +815,10 @@ contract Kodyl {
             }
             bumpCheckedIn(eid, flips);
         }
+        }
     }
 
-    payable fallback() -> () {
+    fallback() payable {
         let sz = calldatasize();
         requireK(sz != 0, "TransferFailed()");
         if (sz >= 4) {
@@ -793,7 +827,7 @@ contract Kodyl {
                     revertEmpty();
                 }
                 checkInBatchImpl();
-                return ();
+                return;
             }
         }
         revertEmpty();

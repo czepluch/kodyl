@@ -3,11 +3,11 @@
 // showcase migrations lean on. check-core.sh compiles this file FIRST, so
 // toolchain drift fails here - small and labeled - before Kodyl does.
 //
-// Canaries (each maps to a Kodyl.solc pattern):
+// Canaries (each maps to a Kodyl.sol pattern):
 //   demandPositive  require(cond, "message") - runtime string literals; the
 //                   native revert is RAW message bytes, not Solidity
 //                   Error(string); CoreProbe.t.sol pins that wire shape
-//   selOf           user-defined Str instance folding keccakLit at compile
+//   selOf           user-defined Str impl folding keccakLit at compile
 //                   time (the ErrSel error-selector pattern)
 //   pushUri/...     UFCS method calls on a storage array of strings
 //   bareLit         bare integer literal in a non-tail return (the
@@ -16,87 +16,85 @@
 //                   two-arg concat (the Ticket/Presence hashing pattern)
 //   recoverSigner   std ecrecover: split v/r/s form, reverts on failure
 //   addrAt/...      lazy calldata dynamic-array params: address (static
-//                   elements), memory(bytes) (dynamic elements), and uint256
+//                   elements), memory<bytes> (dynamic elements), and uint256
 //                   (no upstream fixture - this canary is the coverage)
-import std.{*};
-import std.opcodes.{timestamp, shr};
-import std.dispatch.{*};
-import std.eip712.{*};
+import * from std;
+import {timestamp, shr} from std.opcodes;
+import * from std.dispatch;
+import * from std.eip712;
 
 // A selector type constructible from the error-signature literal itself:
 // "X()" folds to its right-aligned 4-byte selector at compile time via the
 // per-literal clone-and-erase of fromString. No runtime cost, no hash
 // constants in source. Mirrors lib.kodyl's ErrSel exactly, word payload
 // included. Constraint: std.ABIGeneric must NOT be imported into a module
-// defining word-payload data types - its derive fires for every local data
-// type and bare word has no ABIDecode instance (SC0223). The calldata-array
-// params below decode without it.
-data Sel = Sel(word);
+// defining word-payload enums - its derive fires for every local type and
+// bare word has no ABIDecode instance (SC0223). The calldata-array params
+// below decode without it.
+enum Sel { Sel(word) }
 
-instance Sel : Str {
-    function fromString(s : string) -> Sel {
+impl Str<Sel> {
+    function fromString(s: string) returns (Sel) {
         return Sel(shr(224, keccakLit(s)));
     }
 }
 
 contract Probe {
-    stored : uint256;
-    uris : array(string);
+    stored: uint256;
+    uris: array<string>;
 
-    constructor(x : uint256) {
+    constructor(x: uint256) {
         stored = x;
     }
 
-    public function get() -> uint256 {
+    function get() public returns (uint256) {
         return stored;
     }
 
-    public function timeNow() -> uint256 {
+    function timeNow() public returns (uint256) {
         return uint256(timestamp());
     }
 
     // require with a runtime-materialized string literal. On failure the
     // revert payload is the raw UTF-8 bytes of the message (std's Error.Msg
     // shape) - deliberately NOT the Solidity Error(string) ABI encoding.
-    public function demandPositive(x : uint256) -> uint256 {
+    function demandPositive(x: uint256) public returns (uint256) {
         require(x > 0, "Probe: x must be positive");
         return x;
     }
 
-    // The literal resolves through the Sel : Str instance above and folds to
+    // The literal resolves through the Str<Sel> impl above and folds to
     // the canonical selector of EventNotFound() as a compile-time constant.
-    public function selOf() -> uint256 {
-        let e : Sel = "EventNotFound()";
-        match e {
-        | Sel(w) => return uint256(w);
+    function selOf() public returns (uint256) {
+        let e: Sel = "EventNotFound()";
+        match (e) {
+        case Sel(w) { return uint256(w); }
         }
     }
 
     // UFCS storage-array methods on a contract field.
-    public function pushUri(u : memory(string)) -> () {
+    function pushUri(u: memory<string>) public returns (()) {
         uris.push(u);
     }
 
-    public function uriCount() -> uint256 {
+    function uriCount() public returns (uint256) {
         return uris.length();
     }
 
-    public function uriAt(i : uint256) -> memory(string) {
+    function uriAt(i: uint256) public returns (memory<string>) {
         return uris[i];
     }
 
     // Bare literal in a non-tail return: rejected before the
     // call-expected-type unification landed, accepted at the current pin.
-    // (Parameter is uint256, not bool: the std has ABI encoding for bool
-    // returns but no calldata decoder instance for bool parameters.)
-    public function bareLit(x : uint256) -> uint256 {
+    function bareLit(x: uint256) public returns (uint256) {
         if (x > 0) { return 0; }
         return 1;
     }
 
     // std eip712: hashStruct of the standard EIP712Domain shape. Name and
     // version go in pre-hashed (keccakLit folds them at compile time).
-    public function eipDomain(chainId : uint256, verifying : address) -> bytes32 {
+    function eipDomain(chainId: uint256, verifying: address) public returns (bytes32) {
         return eip712DomainSeparator(
             bytes32(keccakLit("Probe")),
             bytes32(keccakLit("1")),
@@ -108,7 +106,7 @@ contract Probe {
     // Hand-rolled hashStruct (typeHash then one word per member) via nested
     // two-arg concat - there is no hashStruct helper in std, so this is the
     // pattern any message struct hash must use.
-    public function eipStructHash(a : uint256, b : address) -> bytes32 {
+    function eipStructHash(a: uint256, b: address) public returns (bytes32) {
         let typeHash = bytes32(keccakLit("Pair(uint256 a,address b)"));
         return keccak256_(concat(
             typeHash,
@@ -117,7 +115,7 @@ contract Probe {
     }
 
     // std eip712: the 0x1901 combinator over the domain above.
-    public function eipDigest(chainId : uint256, verifying : address, structHash : bytes32) -> bytes32 {
+    function eipDigest(chainId: uint256, verifying: address, structHash: bytes32) public returns (bytes32) {
         let dom = eip712DomainSeparator(
             bytes32(keccakLit("Probe")),
             bytes32(keccakLit("1")),
@@ -131,35 +129,35 @@ contract Probe {
     // Reverts rather than returning zero: MalleableSignatureRejected() on
     // high-s, ECRecoverCallFailed() if the precompile call fails,
     // ECRecoverFailed() if it returns no signer.
-    public function recoverSigner(digest : bytes32, v : uint256, r : bytes32, s : bytes32) -> address {
+    function recoverSigner(digest: bytes32, v: uint256, r: bytes32, s: bytes32) public returns (address) {
         return ecrecover(digest, v, r, s);
     }
 
     // Lazy calldata dynamic arrays: static elements (address)...
-    public function addrAt(items : calldata(array(address)), i : uint256) -> address {
+    function addrAt(items: calldata<array<address>>, i: uint256) public returns (address) {
         return items[i];
     }
 
-    public function addrCount(items : calldata(array(address))) -> uint256 {
+    function addrCount(items: calldata<array<address>>) public returns (uint256) {
         return items.length();
     }
 
-    // ...dynamic elements (the element type is spelled memory(bytes))...
-    public function bytesAt(items : calldata(array(memory(bytes))), i : uint256) -> memory(bytes) {
+    // ...dynamic elements (the element type is spelled memory<bytes>)...
+    function bytesAt(items: calldata<array<memory<bytes>>>, i: uint256) public returns (memory<bytes>) {
         return items[i];
     }
 
-    public function bytesCount(items : calldata(array(memory(bytes)))) -> uint256 {
+    function bytesCount(items: calldata<array<memory<bytes>>>) public returns (uint256) {
         return items.length();
     }
 
     // ...and uint256 elements, which no upstream fixture covers: indexing
     // (with the ArrayOutOfBounds() auto-revert) plus a full iteration.
-    public function uintAt(items : calldata(array(uint256)), i : uint256) -> uint256 {
+    function uintAt(items: calldata<array<uint256>>, i: uint256) public returns (uint256) {
         return items[i];
     }
 
-    public function sumOf(items : calldata(array(uint256))) -> uint256 {
+    function sumOf(items: calldata<array<uint256>>) public returns (uint256) {
         let n = items.length();
         let total = uint256(0);
         for (let i = uint256(0); i < n; i = i + 1) {
